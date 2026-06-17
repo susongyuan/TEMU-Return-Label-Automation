@@ -3,8 +3,10 @@ const fs = require('fs');
 const express = require('express');
 const compression = require('compression');
 const { config } = require('./env');
+const { getPool } = require('./db');
 const { createJob, getInternalJob, getJob, listJobs } = require('./jobs');
 const { deleteHistoryRecord, getHistoryRecord, listHistory } = require('./history');
+const { resolveOperatorIdentity } = require('./operator-auth');
 const { probeEccangApi } = require('./api/eccang');
 const { probeGoodcangApi } = require('./api/goodcang');
 const { probeWinitApi } = require('./api/winit');
@@ -45,11 +47,44 @@ app.get('/api/jobs', (req, res) => {
   res.json({ data: listJobs() });
 });
 
-app.post('/api/jobs', (req, res) => {
+app.post('/api/return-label/exchange', async (req, res) => {
   try {
+    const handoffCode = String(req.body?.handoffCode || req.body?.handoff || '').trim();
+    if (!handoffCode) throw new Error('缺少一次性跳转凭证');
+    const response = await fetch(`${config.dashboardBaseUrl}/api/return-label/exchange`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ handoffCode })
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error?.message || '一次性跳转凭证无效');
+    const operator = await resolveOperatorIdentity(getPool(), {
+      operatorKey: payload.data?.operatorKey,
+      operatorName: payload.data?.operatorName
+    });
+    res.json({ data: operator });
+  } catch (error) {
+    res.status(400).json({
+      error: {
+        code: 'RETURN_LABEL_HANDOFF_EXCHANGE_FAILED',
+        message: error.message
+      }
+    });
+  }
+});
+
+app.post('/api/jobs', async (req, res) => {
+  try {
+    if (req.body && req.body.dryRun === false && req.body.allowCreate === true) {
+      await resolveOperatorIdentity(getPool(), {
+        authToken: req.body.authToken || req.body.token,
+        operatorKey: req.body.operatorKey,
+        operatorName: req.body.operatorName
+      });
+    }
     res.status(202).json({ data: createJob(req.body || {}) });
   } catch (error) {
-    res.status(error.statusCode || 500).json({
+    res.status(error.statusCode || (/登录|账号|停用|匹配/.test(error.message) ? 401 : 500)).json({
       error: {
         code: 'JOB_CREATE_FAILED',
         message: error.message

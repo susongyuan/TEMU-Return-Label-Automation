@@ -75,9 +75,36 @@ async function resolveOperator(db, operator = {}) {
   };
 }
 
+async function resolveOperatorIdentity(db, operator = {}) {
+  await initReturnLabelSchema(db);
+  const operatorKey = text(operator.operatorKey);
+  const operatorName = text(operator.operatorName || operator.name);
+  if (text(operator.authToken || operator.token)) return resolveOperator(db, operator);
+  if (!operatorKey || !operatorName) throw new Error('请先登录');
+
+  const [rows] = await db.execute(
+    `SELECT operator_key, operator_name, disabled_at
+     FROM dashboard_operators
+     WHERE operator_key = ?
+     LIMIT 1`,
+    [operatorKey]
+  );
+  if (!rows.length) throw new Error('登录账号不存在，请重新登录');
+  if (rows[0].disabled_at) throw new Error('账号已停用，请联系管理员');
+  if (text(rows[0].operator_name) !== operatorName) throw new Error('登录账号不匹配，请重新打开入口');
+  await db.execute(
+    'UPDATE dashboard_operators SET last_seen_at = CURRENT_TIMESTAMP(3), updated_at = CURRENT_TIMESTAMP(3) WHERE operator_key = ?',
+    [rows[0].operator_key]
+  );
+  return {
+    operatorKey: rows[0].operator_key,
+    operatorName: rows[0].operator_name
+  };
+}
+
 async function resolveOptionalOperator(db, operator = {}) {
   try {
-    return await resolveOperator(db, operator);
+    return await resolveOperatorIdentity(db, operator);
   } catch {
     return {
       operatorKey: null,
@@ -88,5 +115,6 @@ async function resolveOptionalOperator(db, operator = {}) {
 
 module.exports = {
   resolveOperator,
+  resolveOperatorIdentity,
   resolveOptionalOperator
 };

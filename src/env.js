@@ -54,6 +54,7 @@ const config = {
   headless: boolEnv('BROWSER_HEADLESS', true),
   bringToFront: boolEnv('BROWSER_BRING_TO_FRONT', false),
   apiMode: process.env.API_MODE || 'api',
+  dashboardBaseUrl: process.env.DASHBOARD_BASE_URL || 'http://127.0.0.1:3106',
   dryRunDefault: boolEnv('DRY_RUN_DEFAULT', true),
   preferCrawlerOnly: boolEnv('PREFER_CRAWLER_ONLY', false),
   realCreateMaxPerJob: intEnv('REAL_CREATE_MAX_PER_JOB', 5),

@@ -4,7 +4,9 @@ node_modules/
 # Local env and credentials
 .env
 .env.local
+.env.*
 .env.*.local
+!.env.example
 
 # Runtime/cache/logs/labels
 .runtime/

@@ -126,12 +126,30 @@ function storedOperatorPayload() {
 function hydrateOperatorFromQuery() {
   try {
     const params = new URLSearchParams(window.location.search);
-    const authToken = String(params.get('authToken') || '').trim();
-    const operatorKey = String(params.get('operatorKey') || '').trim();
-    const operatorName = String(params.get('operatorName') || '').trim();
-    if (!authToken || !operatorKey || !operatorName) return;
-    localStorage.setItem(OPERATOR_STORAGE_KEY, JSON.stringify({ authToken, operatorKey, operatorName }));
-    window.history.replaceState({}, '', window.location.pathname + window.location.hash);
+    const handoff = String(params.get('handoff') || '').trim();
+    if (!handoff) return;
+    fetch('/api/return-label/exchange', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ handoffCode: handoff })
+    })
+      .then(response => response.json().then(payload => ({ response, payload })))
+      .then(({ response, payload }) => {
+        if (!response.ok) throw new Error(payload.error?.message || '登录态交换失败');
+        const operatorKey = String(payload.data?.operatorKey || '').trim();
+        const operatorName = String(payload.data?.operatorName || '').trim();
+        if (!operatorKey || !operatorName) throw new Error('登录态交换失败');
+        localStorage.setItem(OPERATOR_STORAGE_KEY, JSON.stringify({
+          authToken: '',
+          operatorKey,
+          operatorName
+        }));
+        window.history.replaceState({}, '', window.location.pathname + window.location.hash);
+      })
+      .catch(error => {
+        alert(error.message);
+        window.history.replaceState({}, '', window.location.pathname + window.location.hash);
+      });
   } catch {
     // Keep the existing local operator state if the handoff URL is malformed.
   }
