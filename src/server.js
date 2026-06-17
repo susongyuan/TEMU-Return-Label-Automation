@@ -29,6 +29,18 @@ function withTimeout(promise, ms, fallbackFactory) {
 
 app.use(compression());
 app.use(express.json({ limit: '1mb' }));
+app.use((error, req, res, next) => {
+  if (error instanceof SyntaxError && error.status === 400 && 'body' in error) {
+    res.status(400).json({
+      error: {
+        code: 'INVALID_JSON',
+        message: '请求 JSON 格式错误'
+      }
+    });
+    return;
+  }
+  next(error);
+});
 app.use(express.static(PUBLIC_DIR));
 
 app.get('/api/health', (req, res) => {
@@ -39,6 +51,7 @@ app.get('/api/health', (req, res) => {
     dryRunDefault: config.dryRunDefault,
     realCreateMaxPerJob: config.realCreateMaxPerJob,
     orderConcurrency: config.orderConcurrency,
+    maxOrderConcurrency: config.maxOrderConcurrency,
     preferCrawlerOnly: config.preferCrawlerOnly
   });
 });
@@ -271,5 +284,5 @@ app.use((req, res) => {
 
 app.listen(config.port, config.host, () => {
   console.log(`Return label automation: http://${config.host}:${config.port}`);
-  console.log(`API mode: ${config.apiMode}; dryRunDefault=${config.dryRunDefault}; realCreateMaxPerJob=${config.realCreateMaxPerJob}; orderConcurrency=${config.orderConcurrency}`);
+  console.log(`API mode: ${config.apiMode}; dryRunDefault=${config.dryRunDefault}; realCreateMaxPerJob=${config.realCreateMaxPerJob}; orderConcurrency=${config.orderConcurrency}; maxOrderConcurrency=${config.maxOrderConcurrency}`);
 });

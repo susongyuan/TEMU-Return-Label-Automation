@@ -9,6 +9,7 @@ const {
 const { createWinitReturnApi, findWinitOrderApi } = require('../api/winit');
 
 const SINGLE_ORDER_TIMEOUT_MS = 4 * 60 * 1000;
+const ECCANG_EMPTY_TRACKING_RETRY_MS = 1200;
 
 function clampConcurrency(value, total) {
   const number = Number(value);
@@ -28,6 +29,37 @@ async function mapWithConcurrency(items, concurrency, worker) {
     }
   }));
   return results;
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function queryEccangOrderForWorkflow(stOrderNo, log) {
+  let eccang = await queryEccangOrderApi(stOrderNo);
+  if (eccang.found && !eccang.trackingNo) {
+    log?.('易仓已匹配订单但未返回跟踪号，短暂等待后重试一次');
+    await sleep(ECCANG_EMPTY_TRACKING_RETRY_MS);
+    const retryEccang = await queryEccangOrderApi(stOrderNo);
+    if (retryEccang?.trackingNo || (!eccang.found && retryEccang?.found)) {
+      eccang = retryEccang;
+    }
+  }
+  return eccang;
+}
+
+async function getEccangOrder(stOrderNo, context, log) {
+  if (!context.eccangCache) return queryEccangOrderForWorkflow(stOrderNo, log);
+  if (!context.eccangCache.has(stOrderNo)) {
+    const promise = queryEccangOrderForWorkflow(stOrderNo, log).catch(error => {
+      context.eccangCache.delete(stOrderNo);
+      throw error;
+    });
+    context.eccangCache.set(stOrderNo, promise);
+  } else {
+    log?.('复用同一任务内的易仓查单结果');
+  }
+  return context.eccangCache.get(stOrderNo);
 }
 
 function inferPlatform(eccangResult) {
@@ -105,7 +137,7 @@ async function processSingleOrder(orderInput, options = {}, context = {}) {
 
   try {
     log(`标准化订单号：${stOrderNo}`);
-    const eccang = await queryEccangOrderApi(stOrderNo);
+    const eccang = await getEccangOrder(stOrderNo, context, log);
     result.eccang = eccang;
     log(eccang.found ? '易仓 API 已匹配订单信息' : '易仓 API 未匹配到完整订单信息');
 
@@ -207,6 +239,7 @@ async function processOrders(orders, options = {}, context = {}) {
   const shared = {
     realCreatesDone: 0,
     goodcangDrafts: [],
+    eccangCache: new Map(),
     onUpdate: context.onUpdate
   };
   const concurrency = clampConcurrency(options.concurrency ?? config.orderConcurrency, orders.length);

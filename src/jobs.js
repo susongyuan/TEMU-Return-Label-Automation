@@ -178,6 +178,9 @@ function createJob(body = {}) {
     error.statusCode = 400;
     throw error;
   }
+  const requestedConcurrency = Math.max(1, Number(body.concurrency || config.orderConcurrency) || 1);
+  const maxConcurrency = Math.max(1, config.maxOrderConcurrency || config.orderConcurrency || 1);
+  const concurrency = Math.min(requestedConcurrency, maxConcurrency);
   const job = {
     id: String(nextJobId++),
     createdAt: new Date().toISOString(),
@@ -189,7 +192,7 @@ function createJob(body = {}) {
     options: {
       dryRun,
       allowCreate,
-      concurrency: Math.max(1, Number(body.concurrency || config.orderConcurrency) || 1),
+      concurrency,
       preferCrawlerOnly: body.preferCrawlerOnly == null ? config.preferCrawlerOnly : Boolean(body.preferCrawlerOnly)
     },
     operator: body.operator || {

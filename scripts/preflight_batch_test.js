@@ -1,4 +1,5 @@
 const http = require('http');
+const fs = require('fs');
 
 const DEFAULT_ORDERS = [
   'PO-012-01478546750070498',
@@ -17,6 +18,14 @@ function argValue(name, fallback) {
   const prefix = `--${name}=`;
   const match = process.argv.slice(2).find(item => item.startsWith(prefix));
   return match ? match.slice(prefix.length) : fallback;
+}
+
+function readOrdersFile(file) {
+  if (!file) return [];
+  return fs.readFileSync(file, 'utf8')
+    .split(/\r?\n/)
+    .map(value => value.trim())
+    .filter(Boolean);
 }
 
 function requestJson(method, targetUrl, body) {
@@ -66,12 +75,17 @@ function sleep(ms) {
 
 async function main() {
   const baseUrl = argValue('base-url', process.env.RETURN_AUTOMATION_TEST_URL || 'http://127.0.0.1:3206');
-  const count = Math.min(Math.max(Number(argValue('count', 10)) || 10, 1), 20);
-  const concurrency = Math.min(Math.max(Number(argValue('concurrency', count)) || count, 1), 20);
+  const sourceOrders = readOrdersFile(argValue('orders-file', ''));
+  const availableOrders = sourceOrders.length ? sourceOrders : DEFAULT_ORDERS;
+  const count = Math.min(Math.max(Number(argValue('count', Math.min(10, availableOrders.length))) || 10, 1), 30);
+  const concurrency = Math.min(Math.max(Number(argValue('concurrency', count)) || count, 1), 30);
   const timeoutMs = Math.max(Number(argValue('timeout-ms', 10 * 60 * 1000)) || 10 * 60 * 1000, 30 * 1000);
-  const orders = DEFAULT_ORDERS.slice(0, count);
+  const orders = availableOrders.slice(0, count);
+  if (orders.length !== count) {
+    throw new Error(`Requested ${count} orders, but only ${orders.length} are available. Pass --orders-file=path with more orders.`);
+  }
 
-  console.log(JSON.stringify({ event: 'submit', baseUrl, count, concurrency }, null, 2));
+  console.log(JSON.stringify({ event: 'submit', baseUrl, count, concurrency, source: sourceOrders.length ? 'orders-file' : 'default' }, null, 2));
   const created = await requestJson('POST', `${baseUrl}/api/preflight-jobs`, {
     input: orders.join('\n'),
     dryRun: true,

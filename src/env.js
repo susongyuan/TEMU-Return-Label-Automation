@@ -59,6 +59,7 @@ const config = {
   preferCrawlerOnly: boolEnv('PREFER_CRAWLER_ONLY', false),
   realCreateMaxPerJob: intEnv('REAL_CREATE_MAX_PER_JOB', 5),
   orderConcurrency: intEnv('ORDER_CONCURRENCY', 5),
+  maxOrderConcurrency: intEnv('MAX_ORDER_CONCURRENCY', 30),
   api: {
     goodcang: {
       baseUrl: process.env.GOODCANG_API_BASE || 'https://oms.goodcang.net/public_open',
