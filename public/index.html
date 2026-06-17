@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>退货面单自动化</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hero">
+        <div>
+          <p class="eyebrow">Return Label Automation</p>
+          <h1>批量退货面单创建</h1>
+        </div>
+        <button id="probeBtn" class="button button--ghost" type="button">检查接口</button>
+      </section>
+
+      <nav class="view-tabs" aria-label="功能切换">
+        <button class="tab-button tab-button--active" type="button" data-view-tab="create">创建任务</button>
+        <button class="tab-button" type="button" data-view-tab="history">历史记录</button>
+      </nav>
+
+      <section id="createView" data-view="create">
+        <section class="workspace">
+          <section class="panel panel--input" aria-labelledby="inputTitle">
+            <div class="section-title">
+              <div>
+                <h2 id="inputTitle">订单输入</h2>
+                <p id="inputCount" class="section-note">0 个订单待预检</p>
+              </div>
+              <span class="mode-pill" id="modePill">Dry-run</span>
+            </div>
+            <textarea id="ordersInput" placeholder="每行一个订单；只填订单号走平台自动物流。自选物流写：PO-012-01478546750070498 退货物流号 物流商"></textarea>
+            <div class="controls">
+              <label class="check-row"><input id="dryRun" type="checkbox" checked> 预检模式</label>
+              <label class="check-row"><input id="allowCreate" type="checkbox"> 允许真实创建</label>
+              <button id="runBtn" class="button" type="button">开始处理</button>
+              <button id="exportBtn" class="button button--ghost" type="button">导出 CSV</button>
+            </div>
+          </section>
+
+          <aside class="risk-panel" id="riskNotice" aria-live="polite">
+            <strong>当前为预检模式</strong>
+            <span>只做订单标准化、易仓匹配和物流试算，不创建退货单。</span>
+          </aside>
+        </section>
+
+        <section class="summary-grid" id="summaryGrid" aria-label="批量状态概览"></section>
+        <section class="flow-grid" id="flowPanel" aria-label="任务进展"></section>
+        <section class="statusbar" id="statusbar">等待输入订单。</section>
+        <section class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>原始订单</th>
+                <th>状态</th>
+                <th>仓库来源</th>
+                <th>退货物流信息</th>
+                <th>候选物流费用</th>
+                <th>跟踪号</th>
+                <th>最低价渠道</th>
+                <th>退货单号</th>
+                <th>面单号</th>
+                <th>面单下载</th>
+                <th>备注</th>
+              </tr>
+            </thead>
+            <tbody id="resultsBody"></tbody>
+          </table>
+        </section>
+      </section>
+
+      <section id="historyView" class="view-panel is-hidden" data-view="history" aria-labelledby="historyTitle">
+        <section class="panel">
+          <div class="history-head">
+            <div>
+              <h2 id="historyTitle">历史生成记录</h2>
+              <p id="historyMeta" class="section-note">按平台筛选谷仓和万邑通生成结果。</p>
+            </div>
+            <button id="historyRefreshBtn" class="button button--ghost" type="button">刷新</button>
+          </div>
+          <div class="history-controls">
+            <div class="segmented" role="group" aria-label="平台筛选">
+              <button class="segmented__button segmented__button--active" type="button" data-history-platform="all">全部</button>
+              <button class="segmented__button" type="button" data-history-platform="goodcang">谷仓</button>
+              <button class="segmented__button" type="button" data-history-platform="winit">万邑通</button>
+            </div>
+            <input id="historySearch" class="history-search" type="search" placeholder="搜索订单号、退货单号、面单号">
+          </div>
+        </section>
+
+        <section class="table-wrap table-wrap--history">
+          <table class="history-table">
+            <thead>
+              <tr>
+                <th>生成时间</th>
+                <th>平台</th>
+                <th>原始订单</th>
+                <th>ST 订单</th>
+                <th>状态</th>
+                <th>仓库单号</th>
+                <th>退货单号</th>
+                <th>面单号/跟踪号</th>
+                <th>物流</th>
+                <th>下载</th>
+                <th>备注</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="historyBody">
+              <tr class="empty-row"><td colspan="12">历史记录加载中。</td></tr>
+            </tbody>
+          </table>
+        </section>
+      </section>
+    </main>
+    <script src="app.js"></script>
+  </body>
+</html>

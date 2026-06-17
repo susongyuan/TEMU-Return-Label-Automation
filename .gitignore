@@ -1,0 +1,16 @@
+# Dependencies
+node_modules/
+
+# Local env and credentials
+.env
+.env.local
+.env.*.local
+
+# Runtime/cache/logs/labels
+.runtime/
+logs/
+*.log
+*.tmp
+
+# Office temp files
+~$*

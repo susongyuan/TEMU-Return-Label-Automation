@@ -1,0 +1,10 @@
+.git
+.env
+.env.*
+.runtime
+logs
+node_modules
+*.log
+*.tmp
+README.md
+*.docx
