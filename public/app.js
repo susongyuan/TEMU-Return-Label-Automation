@@ -11,13 +11,18 @@ const state = {
   historyPlatform: 'all',
   historyKeyword: '',
   historyRecords: [],
-  historyTotal: 0
+  historyTotal: 0,
+  quoteAbortController: null,
+  quoteRunId: 0,
+  retryMergeJobId: null
 };
 
 const els = {
   ordersInput: document.querySelector('#ordersInput'),
   dryRun: document.querySelector('#dryRun'),
   allowCreate: document.querySelector('#allowCreate'),
+  winitStockStrategies: document.querySelectorAll('input[name="winitStockStrategy"]'),
+  winitTemplateType: document.querySelector('#winitTemplateType'),
   runBtn: document.querySelector('#runBtn'),
   probeBtn: document.querySelector('#probeBtn'),
   exportBtn: document.querySelector('#exportBtn'),
@@ -35,7 +40,18 @@ const els = {
   historyMeta: document.querySelector('#historyMeta'),
   historyRefreshBtn: document.querySelector('#historyRefreshBtn'),
   historySearch: document.querySelector('#historySearch'),
-  historyPlatformBtns: document.querySelectorAll('[data-history-platform]')
+  historyPlatformBtns: document.querySelectorAll('[data-history-platform]'),
+  quoteDrawerToggle: document.querySelector('#quoteDrawerToggle'),
+  quoteDrawerClose: document.querySelector('#quoteDrawerClose'),
+  quoteDrawer: document.querySelector('#quoteDrawer'),
+  quoteOverlay: document.querySelector('#quoteOverlay'),
+  quoteOrderInput: document.querySelector('#quoteOrderInput'),
+  quotePlatformSelect: document.querySelector('#quotePlatformSelect'),
+  quotePostcodeInput: document.querySelector('#quotePostcodeInput'),
+  quoteRunBtn: document.querySelector('#quoteRunBtn'),
+  quoteStopBtn: document.querySelector('#quoteStopBtn'),
+  quoteStatus: document.querySelector('#quoteStatus'),
+  quoteResult: document.querySelector('#quoteResult')
 };
 
 const POLL_INTERVAL_MS = 1500;
@@ -120,6 +136,25 @@ function storedOperatorPayload() {
     };
   } catch {
     return {};
+  }
+}
+
+function getSelectedWinitStockStrategy() {
+  return Array.from(els.winitStockStrategies || []).find(input => input.checked)?.value || 'photo-hold';
+}
+
+function collectWinitOptions() {
+  return {
+    stockStrategy: getSelectedWinitStockStrategy(),
+    templateType: String(els.winitTemplateType?.value || 'WINIT标准模板-开箱').trim() || 'WINIT标准模板-开箱'
+  };
+}
+
+function updateWinitOptionsUi() {
+  const strategy = getSelectedWinitStockStrategy();
+  const needsTemplate = strategy === 'photo-hold';
+  if (els.winitTemplateType) {
+    els.winitTemplateType.disabled = !needsTemplate;
   }
 }
 
@@ -593,6 +628,17 @@ function findCheapestCandidate(candidates) {
     .sort((a, b) => parsePrice(a.price) - parsePrice(b.price))[0];
 }
 
+function compareCandidatesByPrice(left, right) {
+  const leftPrice = parsePrice(left.price);
+  const rightPrice = parsePrice(right.price);
+  const leftHasPrice = Number.isFinite(leftPrice);
+  const rightHasPrice = Number.isFinite(rightPrice);
+  if (leftHasPrice && rightHasPrice) return leftPrice - rightPrice;
+  if (leftHasPrice) return -1;
+  if (rightHasPrice) return 1;
+  return 0;
+}
+
 function getSelectedLogistics(row) {
   const creation = row.returnCreation || {};
   const explicit = normalizeCandidate(firstValue(
@@ -621,6 +667,38 @@ function sameLogistics(left, right) {
   if (!left || !right) return false;
   if (left.code && right.code) return left.code === right.code;
   return left.name === right.name && String(left.price ?? '') === String(right.price ?? '');
+}
+
+function rowIdentity(row = {}) {
+  return firstValue(row.stOrderNo, row.rawOrderNo ? normalizeStOrder(row.rawOrderNo) : '', row.rawOrderNo, '');
+}
+
+function findDisplayRowByKey(key) {
+  const target = String(key || '').trim();
+  if (!target) return null;
+  return getDisplayRows().find(row =>
+    rowIdentity(row) === target ||
+    row.rawOrderNo === target ||
+    row.stOrderNo === target
+  ) || null;
+}
+
+function mergeDisplayRows(baseRows = [], incomingRows = []) {
+  const rows = baseRows.length ? [...baseRows] : [];
+  for (const incoming of incomingRows) {
+    const key = rowIdentity(incoming);
+    const index = rows.findIndex(row => rowIdentity(row) === key);
+    if (index >= 0) rows[index] = { ...rows[index], ...incoming };
+    else rows.push(incoming);
+  }
+  return rows;
+}
+
+function canManualSelectLogistics(row) {
+  const status = String(displayStatus(row) || row.status || '').toLowerCase();
+  const reviewStatus = ['needs-review', 'review', 'failed', 'error'].includes(status);
+  const source = `${getWarehouseSource(row)} ${row.platform || ''}`;
+  return reviewStatus && /谷仓|goodcang/i.test(source) && getCandidates(row).length > 0;
 }
 
 function renderEccangMatch(row) {
@@ -699,6 +777,9 @@ function renderCandidateList(row) {
   if (!candidates.length) return '<span class="muted-text">未返回报价</span>';
 
   const selected = getSelectedLogistics(row);
+  const manualControls = canManualSelectLogistics(row)
+    ? renderManualLogisticsPicker(row, candidates)
+    : '';
   return `
     <div class="candidate-list">
       ${candidates.map(candidate => `
@@ -707,6 +788,25 @@ function renderCandidateList(row) {
           <span class="money">${escapeHtml(formatMoney(candidate.price, candidate.currency))}</span>
         </span>
       `).join('')}
+    </div>
+    ${manualControls}
+  `;
+}
+
+function renderManualLogisticsPicker(row, candidates = []) {
+  const key = rowIdentity(row);
+  const options = candidates.map((candidate, index) => {
+    const code = candidate.code ? ` / ${candidate.code}` : '';
+    const price = formatMoney(candidate.price, candidate.currency);
+    return `<option value="${index}">${escapeHtml(`${candidate.name}${code} · ${price}`)}</option>`;
+  }).join('');
+  return `
+    <div class="manual-logistics" data-row-key="${escapeHtml(key)}">
+      <select class="select-input manual-logistics__select" data-field="manualLogistics">
+        <option value="">手动选择物流商</option>
+        ${options}
+      </select>
+      <button class="button button--mini manual-logistics__button" type="button" data-action="retry-logistics" disabled>用此物流重试</button>
     </div>
   `;
 }
@@ -739,6 +839,18 @@ function summarizeText(value, maxLength = 52) {
 function renderShortNote(note, noteClass) {
   const text = summarizeText(note || '无', 56);
   return `<span class="note-compact ${noteClass}" title="${escapeHtml(note || '无')}">${escapeHtml(text || '无')}</span>`;
+}
+
+function attemptedLogisticsNote(row = {}) {
+  const attempts = asArray(row.returnCreation?.attemptedLogistics);
+  if (!attempts.length) return '';
+  return attempts
+    .map(item => {
+      const logistics = [item.name, item.code].filter(Boolean).join(' / ');
+      const status = item.created ? '成功' : '失败';
+      return `${logistics || '未知物流'}：${status}${item.message ? `，${item.message}` : ''}`;
+    })
+    .join('；');
 }
 
 function renderFlowPanel(rows) {
@@ -805,7 +917,8 @@ function renderRows() {
   els.resultsBody.innerHTML = rows.map(row => {
     const error = firstValue(row.error, row.message, row.returnCreation?.message, getLastStepMessage(row));
     const quoteMessage = getQuoteMessage(row);
-    const note = [error, quoteMessage].filter(Boolean).join(' / ');
+    const attemptMessage = attemptedLogisticsNote(row);
+    const note = [attemptMessage, error, quoteMessage].filter(Boolean).join(' / ');
     const noteClass = row.status === 'failed' || row.status === 'error' || row.error ? 'error-text' : 'muted-text';
     return `
       <tr class="${rowClass(row.status)}">
@@ -858,6 +971,25 @@ function renderHistoryCode(value) {
   return `<span class="history-code">${escapeHtml(value || '')}</span>`;
 }
 
+function getHistorySelectedLogistics(record = {}) {
+  return normalizeCandidate(firstValue(
+    record.selectedLogistics,
+    record.selectedLogisticsJson,
+    record.responseJson?.returnCreation?.selectedLogistics,
+    record.responseJson?.returnCreation?.shippingQuote?.selected,
+    record.responseJson?.selectedLogistics
+  )) || getSelectedLogistics(record.responseJson || {});
+}
+
+function renderHistoryLogistics(record = {}) {
+  const selected = getHistorySelectedLogistics(record);
+  if (!selected) return '<span class="muted-text">未返回</span>';
+  const name = firstValue(selected.name, selected.code, '未命名渠道');
+  const price = selected.price || selected.price === 0 ? ` ${formatMoney(selected.price, selected.currency)}` : '';
+  const code = selected.code && selected.code !== selected.name ? `<br><span class="mono muted-text">${escapeHtml(selected.code)}</span>` : '';
+  return `<span class="history-text">${escapeHtml(`${name}${price}`)}</span>${code}`;
+}
+
 function renderHistoryRows() {
   if (!els.historyBody) return;
   const rows = state.historyRecords;
@@ -873,10 +1005,6 @@ function renderHistoryRows() {
   }
 
   els.historyBody.innerHTML = rows.map(record => {
-    const selected = record.selectedLogistics || {};
-    const logistics = selected.name
-      ? `${selected.name}${selected.price || selected.price === 0 ? ` ${formatMoney(selected.price, selected.currency)}` : ''}`
-      : '未返回';
     const labelOrTracking = [record.labelNo, record.trackingNo].filter(Boolean).join(' / ');
     return `
       <tr class="${rowClass(record.displayStatus || record.status)}">
@@ -888,7 +1016,7 @@ function renderHistoryRows() {
         <td class="mono">${renderHistoryCode(record.warehouseOrderNo)}</td>
         <td class="mono">${renderHistoryCode(record.returnOrderNo)}</td>
         <td class="mono">${renderHistoryCode(labelOrTracking)}</td>
-        <td><span class="history-text">${escapeHtml(logistics)}</span></td>
+        <td>${renderHistoryLogistics(record)}</td>
         <td>${record.labelDownloadUrl ? `<a class="download-link" href="${escapeHtml(record.labelDownloadUrl)}" download>下载面单</a>` : '<span class="muted-text">无</span>'}</td>
         <td class="history-note-cell">
           <span class="${record.displayStatus === 'failed' || record.status === 'failed' ? 'error-text' : 'muted-text'}">${escapeHtml(record.message || '无')}</span>
@@ -898,6 +1026,208 @@ function renderHistoryRows() {
       </tr>
     `;
   }).join('');
+}
+
+function renderQuoteMetaRow(label, value) {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  return `
+    <div class="quote-meta-row">
+      <span>${escapeHtml(label)}</span>
+      <span>${escapeHtml(text)}</span>
+    </div>
+  `;
+}
+
+function quoteCandidatePool(quote = {}) {
+  const pools = [
+    quote.calculatorCandidates,
+    quote.feeCandidates,
+    quote.returnCandidates,
+    quote.candidates,
+    quote.officialReturnCandidates
+  ];
+  return (pools.find(items => Array.isArray(items) && items.length) || [])
+    .map(normalizeCandidate)
+    .filter(Boolean)
+    .sort(compareCandidatesByPrice);
+}
+
+function getQuoteDisplaySelected(quote = {}) {
+  const candidates = quoteCandidatePool(quote);
+  return findCheapestCandidate(candidates) || normalizeCandidate(quote.selected);
+}
+
+function renderQuoteCandidateList(quote = {}) {
+  const candidates = quoteCandidatePool(quote);
+  if (!candidates.length) {
+    return `<div class="quote-empty">${escapeHtml(quote.message || '未返回可用物流报价')}</div>`;
+  }
+
+  const selected = getQuoteDisplaySelected(quote);
+  return `
+    <div class="quote-candidate-list">
+      ${candidates.map(candidate => `
+        <div class="quote-candidate ${sameLogistics(candidate, selected) ? 'quote-candidate--selected' : ''}">
+          <div class="quote-candidate__main">
+            <span class="quote-candidate__name">${escapeHtml(candidate.name)}</span>
+            ${candidate.code ? `<span class="quote-candidate__code">${escapeHtml(candidate.code)}</span>` : ''}
+          </div>
+          <span class="quote-candidate__price">${escapeHtml(formatMoney(candidate.price, candidate.currency))}</span>
+        </div>
+      `).join('')}
+    </div>
+  `;
+}
+
+function renderQuotePlatformCard(item = {}) {
+  const quote = item.quote || {};
+  const warehouseOrder = item.warehouseOrder || {};
+  const selected = getQuoteDisplaySelected(quote);
+  const selectedText = selected ? `${selected.name} ${formatMoney(selected.price, selected.currency)}` : '';
+  const triedWarehouseCodes = asArray(quote.triedWarehouseCodes).filter(Boolean).join(' / ');
+  return `
+    <section class="quote-card">
+      <div class="quote-card__head">
+        <span class="platform-badge platform-badge--${escapeHtml(item.platform || 'unknown')}">${escapeHtml(item.platformLabel || platformLabel(item.platform))}</span>
+        ${selectedText ? `<span class="money">${escapeHtml(selectedText)}</span>` : ''}
+      </div>
+      <div class="quote-meta">
+        ${renderQuoteMetaRow('仓库单', warehouseOrder.warehouseOrderNo || '未匹配')}
+        ${renderQuoteMetaRow('仓库', firstValue(warehouseOrder.warehouseCode, warehouseOrder.warehouse))}
+        ${renderQuoteMetaRow('资料来源', quote.dataSource)}
+        ${renderQuoteMetaRow('试算仓库', quote.usedWarehouseCode)}
+        ${renderQuoteMetaRow('试过仓库', triedWarehouseCodes)}
+        ${renderQuoteMetaRow('试算邮编', quote.input?.address?.postcode)}
+        ${renderQuoteMetaRow('跟踪号', firstValue(warehouseOrder.trackingNo, asArray(warehouseOrder.trackingNumbers)[0]))}
+        ${renderQuoteMetaRow('状态', warehouseOrder.orderStatus)}
+        ${renderQuoteMetaRow('说明', quote.message || warehouseOrder.message)}
+      </div>
+      ${renderQuoteCandidateList(quote)}
+    </section>
+  `;
+}
+
+function renderShippingQuoteResult(data = {}) {
+  if (!els.quoteResult) return;
+  const eccang = data.eccang || {};
+  const products = asArray(eccang.products)
+    .map(item => `${firstValue(item.warehouseSku, item.sku)} x${Number(item.quantity) || 1}`)
+    .filter(Boolean)
+    .join(' / ');
+  const address = eccang.address || {};
+  const addressText = [
+    address.countryCode,
+    address.state,
+    address.city,
+    address.postcode,
+    address.address1,
+    address.address2
+  ].filter(Boolean).join(' ');
+  const platformCards = asArray(data.quotes).map(renderQuotePlatformCard).join('');
+
+  els.quoteResult.innerHTML = `
+    <section class="quote-card">
+      <div class="quote-card__head">
+        <strong>易仓匹配</strong>
+        <span class="mono muted-text">${escapeHtml(data.stOrderNo || '')}</span>
+      </div>
+      <div class="quote-meta">
+        ${renderQuoteMetaRow('订单号', data.rawOrderNo)}
+        ${renderQuoteMetaRow('仓库来源', platformLabel(data.inferredPlatform || eccang.platform))}
+        ${renderQuoteMetaRow('易仓仓库', firstValue(eccang.warehouseCode, eccang.warehouse))}
+        ${renderQuoteMetaRow('易仓单号', eccang.warehouseOrderNo)}
+        ${renderQuoteMetaRow('跟踪号', eccang.trackingNo)}
+        ${renderQuoteMetaRow('SKU', products)}
+        ${renderQuoteMetaRow('地址', addressText)}
+        ${renderQuoteMetaRow('补充邮编', data.addressSupplement?.postcode)}
+      </div>
+    </section>
+    ${platformCards || '<div class="quote-empty">没有返回试算结果。</div>'}
+  `;
+}
+
+function setQuoteStatus(message, isError = false) {
+  if (!els.quoteStatus) return;
+  els.quoteStatus.textContent = message;
+  els.quoteStatus.classList.toggle('quote-status--error', isError);
+}
+
+function setQuoteRunning(running) {
+  if (els.quoteRunBtn) els.quoteRunBtn.disabled = running;
+  if (els.quoteStopBtn) els.quoteStopBtn.disabled = !running;
+  if (els.quoteOrderInput) els.quoteOrderInput.disabled = running;
+  if (els.quotePlatformSelect) els.quotePlatformSelect.disabled = running;
+  if (els.quotePostcodeInput) els.quotePostcodeInput.disabled = running;
+}
+
+function stopShippingQuote() {
+  if (!state.quoteAbortController) return;
+  state.quoteAbortController.abort();
+  state.quoteAbortController = null;
+  state.quoteRunId += 1;
+  setQuoteRunning(false);
+  setQuoteStatus('已停止本次试算。');
+}
+
+function setQuoteDrawerOpen(open) {
+  els.quoteDrawer?.classList.toggle('is-open', open);
+  els.quoteDrawer?.setAttribute('aria-hidden', open ? 'false' : 'true');
+  els.quoteOverlay?.classList.toggle('is-hidden', !open);
+  els.quoteOverlay?.setAttribute('aria-hidden', open ? 'false' : 'true');
+  if (open && els.quoteOrderInput && !els.quoteOrderInput.value.trim()) {
+    const firstOrder = getInputOrders()[0]?.rawOrderNo || '';
+    if (firstOrder) els.quoteOrderInput.value = firstOrder;
+  }
+  if (open) setTimeout(() => els.quoteOrderInput?.focus(), 80);
+}
+
+async function runShippingQuote() {
+  if (state.quoteAbortController) state.quoteAbortController.abort();
+  const orderNo = String(els.quoteOrderInput?.value || '').trim();
+  const platform = String(els.quotePlatformSelect?.value || 'auto').trim();
+  const postcode = String(els.quotePostcodeInput?.value || '').trim();
+  if (!orderNo) {
+    setQuoteStatus('请输入易仓完整订单号。', true);
+    return;
+  }
+
+  const controller = new AbortController();
+  const runId = state.quoteRunId + 1;
+  state.quoteRunId = runId;
+  state.quoteAbortController = controller;
+  setQuoteRunning(true);
+  setQuoteStatus(platform === 'auto'
+    ? '正在匹配易仓仓库来源并试算...'
+    : `正在调用${platformLabel(platform)}费用计算器...`);
+  if (els.quoteResult) els.quoteResult.innerHTML = '<div class="quote-empty">试算中...</div>';
+
+  try {
+    const res = await fetch('/api/shipping-quotes', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ orderNo, platform, postcode }),
+      signal: controller.signal
+    });
+    if (runId !== state.quoteRunId) return;
+    const json = await readJson(res);
+    if (!res.ok) throw new Error(errorMessage(json, '运费试算失败'));
+    const payload = getPayload(json);
+    renderShippingQuoteResult(payload);
+    const quote = asArray(payload.quotes)[0]?.quote || {};
+    const count = quoteCandidatePool(quote).length;
+    setQuoteStatus(`试算完成：${platformLabel(asArray(payload.quotes)[0]?.platform || payload.inferredPlatform)}，返回 ${count} 个候选物流。`);
+  } catch (error) {
+    if (error.name === 'AbortError') return;
+    if (runId !== state.quoteRunId) return;
+    if (els.quoteResult) els.quoteResult.innerHTML = '';
+    setQuoteStatus(error.message, true);
+  } finally {
+    if (runId === state.quoteRunId) {
+      state.quoteAbortController = null;
+      setQuoteRunning(false);
+    }
+  }
 }
 
 async function loadHistory({ silent = false } = {}) {
@@ -1027,12 +1357,13 @@ function updateRiskNotice() {
   if (els.riskNotice) {
     const crawlerNote = state.preferCrawlerOnly
       ? '当前为 API 模式；旧爬虫兜底开关仍开启，请后端确认。'
-      : '当前为 API 模式；会直接调用开放接口创建并下载面单。';
+      : '谷仓继续走 API；万邑通会按当前页面策略创建。';
     els.riskNotice.innerHTML = `<strong>真实创建已解锁</strong><span>本批最多提交 ${state.realCreateMaxPerJob} 单，并发 ${state.orderConcurrency} 单；单列走平台自动物流，三列走自选物流。${crawlerNote}</span>`;
   }
 }
 
 function updateUiFromInput() {
+  updateWinitOptionsUi();
   updateInputMeta();
   updateRiskNotice();
   if (!state.job && !state.results.length) renderRows();
@@ -1097,7 +1428,11 @@ function stopPolling() {
 function applyJob(jobLike) {
   const job = normalizeJob(getJobPayload(jobLike));
   state.job = job;
-  state.results = job.results.length ? job.results : state.results;
+  if (state.retryMergeJobId && job.id === state.retryMergeJobId) {
+    state.results = mergeDisplayRows(state.results.length ? state.results : getDisplayRows(), job.results);
+  } else {
+    state.results = job.results.length ? job.results : state.results;
+  }
   renderRows();
   return job;
 }
@@ -1123,6 +1458,7 @@ function schedulePoll(id) {
       } else {
         stopPolling();
         closeJobStream();
+        if (state.retryMergeJobId === job.id) state.retryMergeJobId = null;
         loadHistory({ silent: true });
       }
     } catch (error) {
@@ -1140,6 +1476,7 @@ function schedulePoll(id) {
 }
 
 async function createJob() {
+  state.retryMergeJobId = null;
   const orders = getInputOrders();
   const liveCreate = !els.dryRun?.checked;
 
@@ -1171,18 +1508,21 @@ async function createJob() {
   setStatus(liveCreate ? '正在提交真实创建任务...' : '正在提交 dry-run 预检任务...');
 
   try {
+    const payload = {
+      input: els.ordersInput?.value || '',
+      orders,
+      dryRun: Boolean(els.dryRun?.checked),
+      allowCreate: Boolean(els.allowCreate?.checked),
+      concurrency: state.orderConcurrency,
+      winitOptions: collectWinitOptions(),
+      ...storedOperatorPayload()
+    };
+    if (payload.dryRun) payload.preflight = true;
+
     const res = await fetch('/api/jobs', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        input: els.ordersInput?.value || '',
-        orders,
-        dryRun: Boolean(els.dryRun?.checked),
-        allowCreate: Boolean(els.allowCreate?.checked),
-        concurrency: state.orderConcurrency,
-        preflight: Boolean(els.dryRun?.checked),
-        ...storedOperatorPayload()
-      })
+      body: JSON.stringify(payload)
     });
     const json = await readJson(res);
     if (!res.ok) throw new Error(errorMessage(json, '创建任务失败'));
@@ -1205,6 +1545,84 @@ async function createJob() {
     renderRows();
   } finally {
     if (els.runBtn) els.runBtn.disabled = false;
+  }
+}
+
+async function retryWithSelectedLogistics(form) {
+  const row = findDisplayRowByKey(form?.dataset?.rowKey || '');
+  const select = form?.querySelector('[data-field="manualLogistics"]');
+  const index = Number(select?.value);
+  const candidates = row ? getCandidates(row) : [];
+  const candidate = Number.isInteger(index) ? candidates[index] : null;
+  const preferred = firstValue(candidate?.code, candidate?.name, '');
+  if (!row || !candidate || !preferred) {
+    setStatus('请先选择一个可用物流商。', true);
+    return;
+  }
+
+  const liveCreate = !els.dryRun?.checked;
+  if (liveCreate && !els.allowCreate?.checked) {
+    setStatus('真实创建前需要勾选“允许真实创建”。', true);
+    updateRiskNotice();
+    return;
+  }
+
+  stopPolling();
+  closeJobStream();
+  const retryRow = {
+    ...row,
+    status: 'queued',
+    displayStatus: 'queued',
+    preferredReturnCourier: preferred,
+    manualRetryLogistics: candidate,
+    error: '',
+    message: `已选择 ${candidate.name || preferred}，等待重试。`
+  };
+  state.results = mergeDisplayRows(getDisplayRows(), [retryRow]);
+  renderRows();
+  setStatus(`正在用 ${candidate.name || preferred} 重试 ${row.rawOrderNo || row.stOrderNo}...`);
+
+  try {
+    const payload = {
+      orders: [{
+        rawOrderNo: row.rawOrderNo || row.stOrderNo,
+        stOrderNo: row.stOrderNo || normalizeStOrder(row.rawOrderNo),
+        returnLogisticsMode: 'auto',
+        preferredReturnCourier: preferred,
+        manualSelectedLogistics: candidate
+      }],
+      dryRun: Boolean(els.dryRun?.checked),
+      allowCreate: Boolean(els.allowCreate?.checked),
+      concurrency: 1,
+      winitOptions: collectWinitOptions(),
+      ...storedOperatorPayload()
+    };
+    if (payload.dryRun) payload.preflight = true;
+
+    const res = await fetch('/api/jobs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const json = await readJson(res);
+    if (!res.ok) throw new Error(errorMessage(json, '物流重试任务创建失败'));
+
+    const job = normalizeJob(getJobPayload(json));
+    if (!job.id) throw new Error('后端未返回任务 ID，无法轮询重试结果。');
+    state.retryMergeJobId = job.id;
+    applyJob(job);
+    state.pollStartedAt = Date.now();
+    connectJobStream(job.id);
+    if (!isTerminalStatus(job.status)) {
+      schedulePoll(job.id);
+    } else {
+      state.retryMergeJobId = null;
+      loadHistory({ silent: true });
+    }
+  } catch (error) {
+    state.results = mergeDisplayRows(getDisplayRows(), [{ ...row, status: 'needs-review', error: error.message }]);
+    setStatus(error.message, true);
+    renderRows();
   }
 }
 
@@ -1292,6 +1710,13 @@ function exportCsv() {
 
 function handleResultsInput(event) {
   const input = event.target?.closest?.('[data-field="customerReturnTrackingNo"]');
+  const select = event.target?.closest?.('[data-field="manualLogistics"]');
+  if (select) {
+    const form = select.closest('.manual-logistics');
+    const button = form?.querySelector('[data-action="retry-logistics"]');
+    if (button) button.disabled = !select.value;
+    return;
+  }
   if (!input) return;
   const form = input.closest('.inline-form');
   const button = form?.querySelector('[data-action="save-tracking"]');
@@ -1299,6 +1724,11 @@ function handleResultsInput(event) {
 }
 
 function handleResultsClick(event) {
+  const retryButton = event.target?.closest?.('[data-action="retry-logistics"]');
+  if (retryButton) {
+    retryWithSelectedLogistics(retryButton.closest('.manual-logistics'));
+    return;
+  }
   const button = event.target?.closest?.('[data-action="save-tracking"]');
   if (!button) return;
   const form = button.closest('.inline-form');
@@ -1310,7 +1740,19 @@ function handleResultsClick(event) {
 els.runBtn?.addEventListener('click', createJob);
 els.probeBtn?.addEventListener('click', probeLogins);
 els.exportBtn?.addEventListener('click', exportCsv);
+els.quoteDrawerToggle?.addEventListener('click', () => setQuoteDrawerOpen(true));
+els.quoteDrawerClose?.addEventListener('click', () => setQuoteDrawerOpen(false));
+els.quoteOverlay?.addEventListener('click', () => setQuoteDrawerOpen(false));
+els.quoteRunBtn?.addEventListener('click', runShippingQuote);
+els.quoteStopBtn?.addEventListener('click', stopShippingQuote);
+els.quoteOrderInput?.addEventListener('keydown', event => {
+  if (event.key === 'Enter') runShippingQuote();
+});
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape') setQuoteDrawerOpen(false);
+});
 els.resultsBody?.addEventListener('input', handleResultsInput);
+els.resultsBody?.addEventListener('change', handleResultsInput);
 els.resultsBody?.addEventListener('click', handleResultsClick);
 els.ordersInput?.addEventListener('input', updateUiFromInput);
 els.dryRun?.addEventListener('change', updateUiFromInput);
@@ -1323,6 +1765,10 @@ els.historySearch?.addEventListener('input', event => scheduleHistorySearch(even
 els.historyPlatformBtns.forEach(button => {
   button.addEventListener('click', () => setHistoryPlatform(button.dataset.historyPlatform));
 });
+els.winitStockStrategies.forEach(input => {
+  input.addEventListener('change', updateUiFromInput);
+});
+els.winitTemplateType?.addEventListener('change', updateUiFromInput);
 els.historyBody?.addEventListener('click', event => {
   const button = event.target?.closest?.('[data-history-delete]');
   if (!button) return;

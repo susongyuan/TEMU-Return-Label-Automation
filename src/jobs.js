@@ -37,6 +37,15 @@ function firstValue(...values) {
   return values.find(value => value !== undefined && value !== null && value !== '');
 }
 
+function normalizeWinitOptions(value = {}) {
+  const source = value && typeof value === 'object' ? value : {};
+  const strategy = String(firstValue(source.stockStrategy, source.strategy, source.returnStrategy, 'photo-hold')).trim();
+  return {
+    stockStrategy: ['photo-hold', 'direct-shelve', 'destroy'].includes(strategy) ? strategy : 'photo-hold',
+    templateType: String(firstValue(source.templateType, source.photoTemplateType, 'WINIT标准模板-开箱')).trim() || 'WINIT标准模板-开箱'
+  };
+}
+
 function getReturnOrderNo(result) {
   const creation = result.returnCreation || {};
   return firstValue(result.returnOrderNo, creation.returnOrderNo, creation.orderNo, creation.id);
@@ -163,11 +172,11 @@ function createJob(body = {}) {
     error.statusCode = 400;
     throw error;
   }
-  const preflight = body.preflight == null ? null : Boolean(body.preflight);
+  const preflight = body.preflight === true;
   const allowCreate = preflight ? false : Boolean(body.allowCreate);
-  const dryRun = preflight == null
-    ? (body.dryRun == null ? config.dryRunDefault : Boolean(body.dryRun))
-    : true;
+  const dryRun = preflight
+    ? true
+    : (body.dryRun == null ? config.dryRunDefault : Boolean(body.dryRun));
   if (!dryRun && !allowCreate) {
     const error = new Error('真实创建必须勾选允许真实创建；否则请使用预检模式');
     error.statusCode = 400;
@@ -193,7 +202,8 @@ function createJob(body = {}) {
       dryRun,
       allowCreate,
       concurrency,
-      preferCrawlerOnly: body.preferCrawlerOnly == null ? config.preferCrawlerOnly : Boolean(body.preferCrawlerOnly)
+      preferCrawlerOnly: body.preferCrawlerOnly == null ? config.preferCrawlerOnly : Boolean(body.preferCrawlerOnly),
+      winitOptions: normalizeWinitOptions(body.winitOptions || body.winitCreateOptions || {})
     },
     operator: body.operator || {
       authToken: body.authToken || body.token,

@@ -61,9 +61,16 @@ function numericAmount(...values) {
   return null;
 }
 
+function hasNumericAmount(value) {
+  return value !== null &&
+    value !== undefined &&
+    value !== '' &&
+    Number.isFinite(Number(value));
+}
+
 function chooseCheapest(candidates = []) {
   return candidates
-    .filter(item => Number.isFinite(Number(item.price)))
+    .filter(item => hasNumericAmount(item.price))
     .sort((left, right) => Number(left.price) - Number(right.price))[0] || null;
 }
 
@@ -199,6 +206,7 @@ module.exports = {
   extractTrackingNumbers,
   fetchJson,
   firstNonEmpty,
+  hasNumericAmount,
   includesQuery,
   isBlank,
   md5,

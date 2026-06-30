@@ -220,13 +220,21 @@ function normalizeProducts(value) {
     )) || 1;
     return { sku, warehouseSku, quantity };
   }).filter(item => item.sku || item.warehouseSku);
-  const seen = new Set();
-  return products.filter(item => {
-    const key = `${item.sku}|${item.warehouseSku}|${item.quantity}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
+  const bySku = new Map();
+  for (const item of products) {
+    const key = firstNonEmpty(item.warehouseSku, item.sku);
+    const existing = bySku.get(key);
+    if (!existing) {
+      bySku.set(key, item);
+      continue;
+    }
+    bySku.set(key, {
+      sku: firstNonEmpty(existing.sku, item.sku),
+      warehouseSku: firstNonEmpty(existing.warehouseSku, item.warehouseSku),
+      quantity: Math.max(Number(existing.quantity) || 1, Number(item.quantity) || 1)
+    });
+  }
+  return [...bySku.values()];
 }
 
 function normalizeAddress(value) {
@@ -523,6 +531,15 @@ function hasCreationInputs(parsed) {
   );
 }
 
+function hasQuoteInputs(parsed) {
+  return Boolean(
+    parsed?.found &&
+    parsed.products?.length &&
+    parsed.address?.countryCode &&
+    (parsed.warehouseCode || parsed.warehouse || parsed.warehouseOrderNo)
+  );
+}
+
 async function runEccangAttempt(attempt, stOrderNo, responses) {
   const response = await eccangCall(attempt.method, attempt.biz);
   responses.push(response);
@@ -566,22 +583,23 @@ async function enrichParsedOrder(parsed, stOrderNo, responses) {
   return best;
 }
 
-async function tryOrderQueries(stOrderNo) {
+async function tryOrderQueries(stOrderNo, options = {}) {
   const responses = [];
   let best = null;
   for (const attempt of buildOrderAttempts(stOrderNo)) {
     const parsed = await runEccangAttempt(attempt, stOrderNo, responses);
     if (parsed?.found) {
       best = betterParsed(best, await enrichParsedOrder(parsed, stOrderNo, responses));
+      if (options.quoteMode && hasQuoteInputs(best) && !best.warehouseOrderNo) return { parsed: best, responses };
       if (hasCreationInputs(best)) return { parsed: best, responses };
     }
   }
   return { parsed: best, responses };
 }
 
-async function queryEccangOrderApi(rawOrderNo) {
+async function queryEccangOrderApi(rawOrderNo, options = {}) {
   const stOrderNo = normalizeOrderNo(rawOrderNo);
-  const { parsed, responses } = await tryOrderQueries(stOrderNo);
+  const { parsed, responses } = await tryOrderQueries(stOrderNo, options);
   if (parsed) return parsed;
   const last = responses[responses.length - 1] || {};
   return {

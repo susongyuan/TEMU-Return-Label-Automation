@@ -13,7 +13,10 @@
           <p class="eyebrow">Return Label Automation</p>
           <h1>批量退货面单创建</h1>
         </div>
-        <button id="probeBtn" class="button button--ghost" type="button">检查接口</button>
+        <div class="hero-actions">
+          <button id="quoteDrawerToggle" class="button button--ghost" type="button">运费试算</button>
+          <button id="probeBtn" class="button button--ghost" type="button">检查接口</button>
+        </div>
       </section>
 
       <nav class="view-tabs" aria-label="功能切换">
@@ -35,6 +38,23 @@
             <div class="controls">
               <label class="check-row"><input id="dryRun" type="checkbox" checked> 预检模式</label>
               <label class="check-row"><input id="allowCreate" type="checkbox"> 允许真实创建</label>
+              <div class="winit-options" aria-labelledby="winitOptionsTitle">
+                <div class="winit-options__head">
+                  <strong id="winitOptionsTitle">万邑通创建选项</strong>
+                  <span>仅万邑通生效，谷仓忽略</span>
+                </div>
+                <div class="winit-options__body">
+                  <div class="winit-strategy" role="radiogroup" aria-label="万邑通退货策略">
+                    <label class="check-row"><input type="radio" name="winitStockStrategy" value="photo-hold" checked> 拍照暂存</label>
+                    <label class="check-row"><input type="radio" name="winitStockStrategy" value="direct-shelve"> 直接上架</label>
+                    <label class="check-row"><input type="radio" name="winitStockStrategy" value="destroy"> 销毁</label>
+                  </div>
+                  <select id="winitTemplateType" class="select-input">
+                  <option value="WINIT标准模板-开箱">WINIT标准模板-开箱</option>
+                  <option value="WINIT标准模板-不开箱">WINIT标准模板-不开箱</option>
+                  </select>
+                </div>
+              </div>
               <button id="runBtn" class="button" type="button">开始处理</button>
               <button id="exportBtn" class="button button--ghost" type="button">导出 CSV</button>
             </div>
@@ -115,6 +135,34 @@
         </section>
       </section>
     </main>
+    <div id="quoteOverlay" class="drawer-overlay is-hidden" aria-hidden="true"></div>
+    <aside id="quoteDrawer" class="quote-drawer" aria-labelledby="quoteDrawerTitle" aria-hidden="true">
+      <div class="quote-drawer__head">
+        <div>
+          <p class="eyebrow">Shipping Calculator</p>
+          <h2 id="quoteDrawerTitle">运费试算</h2>
+        </div>
+        <button id="quoteDrawerClose" class="button button--ghost button--mini" type="button">收起</button>
+      </div>
+      <div class="quote-form">
+        <label class="field-label" for="quoteOrderInput">易仓完整订单号</label>
+        <input id="quoteOrderInput" class="text-input mono" type="text" placeholder="PO-068-12268771062393641">
+        <label class="field-label" for="quotePlatformSelect">计算平台</label>
+        <select id="quotePlatformSelect" class="select-input">
+          <option value="auto">自动匹配</option>
+          <option value="goodcang">谷仓</option>
+          <option value="winit">万邑通</option>
+        </select>
+        <label class="field-label" for="quotePostcodeInput">邮编补充</label>
+        <input id="quotePostcodeInput" class="text-input mono" type="text" placeholder="仅待发货/仓库单缺邮编时填写">
+        <div class="quote-actions">
+          <button id="quoteRunBtn" class="button" type="button">开始试算</button>
+          <button id="quoteStopBtn" class="button button--danger" type="button" disabled>停止</button>
+        </div>
+      </div>
+      <div id="quoteStatus" class="quote-status">输入订单号后开始试算。</div>
+      <div id="quoteResult" class="quote-result"></div>
+    </aside>
     <script src="app.js"></script>
   </body>
 </html>

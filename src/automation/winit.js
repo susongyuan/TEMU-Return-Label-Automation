@@ -511,7 +511,7 @@ async function selectWinitDropdown(page, fieldLabels, optionLabels, waitAfterMs 
   }
   if (opened) await sleep(500);
   const option = await clickWinitText(page, optionLabels, { waitAfterMs });
-  return option || opened;
+  return option || null;
 }
 
 async function fillWinitField(page, selectors, value, hints = [], timeout = 8000) {
@@ -696,6 +696,225 @@ async function selectWinitSelectByInputId(page, inputId, optionLabels, waitAfter
   }, {
     targetInputId: inputId,
     plainLabels: labelList.filter(label => typeof label === 'string'),
+    sourcePatterns: regexSources(labelList)
+  });
+  if (selected && waitAfterMs) await sleep(waitAfterMs);
+  return selected;
+}
+
+function winitSelectionMatches(result, optionLabels) {
+  if (!result) return false;
+  const labels = (Array.isArray(optionLabels) ? optionLabels : [optionLabels]).filter(Boolean);
+  const selectedText = compactText([result.selectedText, result.text, result.title, result.aria].filter(Boolean).join(' '));
+  if (!selectedText) return false;
+  const selectedWithoutPlaceholder = compactText(selectedText.replace(/请选择|please\s*select/ig, ''));
+  if (!selectedWithoutPlaceholder) return false;
+  return labels.some(label => {
+    if (label instanceof RegExp) return label.test(selectedText);
+    return includesQuery(selectedText, label);
+  });
+}
+
+async function readWinitSelectState(page, inputId) {
+  return evaluateInWinitFrames(page, targetInputId => {
+    const input = document.querySelector(`#${CSS.escape(targetInputId)}`);
+    const select = input?.closest('.winitd-select,.ant-select');
+    if (!select) return null;
+    const textOf = element => (element?.innerText || element?.textContent || element?.value || '').replace(/\s+/g, ' ').trim();
+    const selected = select.querySelector('.winitd-select-selection-item,.ant-select-selection-item');
+    const placeholder = select.querySelector('.winitd-select-selection-placeholder,.ant-select-selection-placeholder');
+    return {
+      inputId: targetInputId,
+      value: input.value || '',
+      text: textOf(selected) || textOf(select),
+      title: selected?.getAttribute('title') || '',
+      selectedText: [
+        selected?.getAttribute('title'),
+        textOf(selected),
+        textOf(placeholder),
+        textOf(select)
+      ].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim()
+    };
+  }, inputId);
+}
+
+async function selectWinitFirstOptionByInputId(page, inputId, waitAfterMs = 1000) {
+  const selected = await evaluateInWinitFrames(page, async targetInputId => {
+    const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+    const visible = element => {
+      if (!element) return false;
+      const rect = element.getBoundingClientRect();
+      const style = getComputedStyle(element);
+      return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none' && style.pointerEvents !== 'none';
+    };
+    const textOf = element => (element?.innerText || element?.textContent || element?.value || '').replace(/\s+/g, ' ').trim();
+    const fire = element => {
+      if (!element) return;
+      element.scrollIntoView?.({ block: 'center', inline: 'center' });
+      const Pointer = window.PointerEvent || window.MouseEvent;
+      element.dispatchEvent(new Pointer('pointerover', { bubbles: true, cancelable: true, pointerType: 'mouse', isPrimary: true, view: window }));
+      element.dispatchEvent(new MouseEvent('mouseover', { bubbles: true, cancelable: true, view: window }));
+      element.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, cancelable: true, view: window }));
+      element.dispatchEvent(new Pointer('pointerdown', { bubbles: true, cancelable: true, pointerType: 'mouse', isPrimary: true, view: window }));
+      element.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+      element.dispatchEvent(new Pointer('pointerup', { bubbles: true, cancelable: true, pointerType: 'mouse', isPrimary: true, view: window }));
+      element.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
+      element.click();
+    };
+    const currentSelection = select => [
+      select.querySelector('.winitd-select-selection-item,.ant-select-selection-item')?.getAttribute('title'),
+      select.querySelector('.winitd-select-selection-item,.ant-select-selection-item')?.innerText,
+      select.innerText,
+      select.textContent
+    ].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+    const input = document.querySelector(`#${CSS.escape(targetInputId)}`);
+    const select = input?.closest('.winitd-select,.ant-select');
+    if (!select || !visible(select)) return null;
+    fire(select.querySelector('.winitd-select-selector,.ant-select-selector,input') || select);
+    let options = [];
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      await delay(150);
+      options = Array.from(document.querySelectorAll('.winitd-select-dropdown:not(.winitd-select-dropdown-hidden) .winitd-select-item-option,.ant-select-dropdown:not(.ant-select-dropdown-hidden) .ant-select-item-option,[role="option"]'))
+        .filter(visible)
+        .map(element => ({
+          element,
+          text: textOf(element),
+          title: element.getAttribute('title') || '',
+          aria: element.getAttribute('aria-label') || ''
+        }))
+        .filter(item => {
+          const text = `${item.text || ''} ${item.title || ''} ${item.aria || ''}`.replace(/\s+/g, ' ').trim();
+          return text && !/请选择|please\s*select/i.test(text);
+        });
+      if (options.length) break;
+    }
+    const option = options[0];
+    if (!option) return null;
+    fire(option.element.querySelector('.winitd-select-item-option-content,.ant-select-item-option-content') || option.element);
+    await delay(1000);
+    return {
+      text: option.text || option.title || option.aria,
+      selectedText: currentSelection(select),
+      options: options.map(item => item.text || item.title || item.aria).slice(0, 20),
+      fallbackFirstOption: true
+    };
+  }, inputId);
+  if (selected && waitAfterMs) await sleep(waitAfterMs);
+  return selected;
+}
+
+async function selectWinitSearchableByInputId(page, inputId, optionLabels, waitAfterMs = 1000) {
+  const labelList = (Array.isArray(optionLabels) ? optionLabels : [optionLabels]).filter(Boolean);
+  const plainLabels = labelList.filter(label => typeof label === 'string').map(label => String(label).trim()).filter(Boolean);
+  const selected = await evaluateInWinitFrames(page, async ({ targetInputId, plainLabels, sourcePatterns }) => {
+    const regexes = sourcePatterns.map(item => new RegExp(item.source, item.flags));
+    const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+    const visible = element => {
+      if (!element) return false;
+      const rect = element.getBoundingClientRect();
+      const style = getComputedStyle(element);
+      return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none' && style.pointerEvents !== 'none';
+    };
+    const textOf = element => (element?.innerText || element?.textContent || element?.value || '').replace(/\s+/g, ' ').trim();
+    const fire = element => {
+      if (!element) return;
+      element.scrollIntoView?.({ block: 'center', inline: 'center' });
+      const Pointer = window.PointerEvent || window.MouseEvent;
+      element.dispatchEvent(new Pointer('pointerover', { bubbles: true, cancelable: true, pointerType: 'mouse', isPrimary: true, view: window }));
+      element.dispatchEvent(new MouseEvent('mouseover', { bubbles: true, cancelable: true, view: window }));
+      element.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, cancelable: true, view: window }));
+      element.dispatchEvent(new Pointer('pointerdown', { bubbles: true, cancelable: true, pointerType: 'mouse', isPrimary: true, view: window }));
+      element.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+      element.dispatchEvent(new Pointer('pointerup', { bubbles: true, cancelable: true, pointerType: 'mouse', isPrimary: true, view: window }));
+      element.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
+      element.click();
+    };
+    const setInputValue = (input, nextValue) => {
+      if (!input) return false;
+      const prototype = input.tagName === 'TEXTAREA'
+        ? window.HTMLTextAreaElement.prototype
+        : window.HTMLInputElement.prototype;
+      const setter = Object.getOwnPropertyDescriptor(prototype, 'value')?.set;
+      input.focus?.();
+      if (setter) setter.call(input, '');
+      else input.value = '';
+      input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'deleteContentBackward', data: null }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+      if (setter) setter.call(input, nextValue);
+      else input.value = nextValue;
+      input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: nextValue }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+      input.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: nextValue.slice(-1) || '' }));
+      return true;
+    };
+    const matches = item => {
+      const text = `${item.title || ''} ${item.aria || ''} ${item.text || ''}`;
+      return plainLabels.some(label => item.text === label || item.title === label || item.aria === label || text.includes(label)) ||
+        regexes.some(regex => regex.test(text));
+    };
+    const currentSelection = select => [
+      select.querySelector('.winitd-select-selection-item,.ant-select-selection-item')?.getAttribute('title'),
+      select.querySelector('.winitd-select-selection-item,.ant-select-selection-item')?.innerText,
+      select.innerText,
+      select.textContent
+    ].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+
+    const input = document.querySelector(`#${CSS.escape(targetInputId)}`);
+    const select = input?.closest('.winitd-select,.ant-select');
+    if (!select || !visible(select)) return null;
+    fire(select.querySelector('.winitd-select-selector,.ant-select-selector,input') || select);
+    await delay(300);
+
+    const searchText = plainLabels[0] || '';
+    const searchInput = select.querySelector('input:not([type="hidden"])') ||
+      document.querySelector('.winitd-select-dropdown:not(.winitd-select-dropdown-hidden) input,.ant-select-dropdown:not(.ant-select-dropdown-hidden) input') ||
+      input;
+    if (searchText && searchInput) {
+      setInputValue(searchInput, searchText);
+      await delay(900);
+    }
+
+    let options = [];
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      await delay(150);
+      options = Array.from(document.querySelectorAll('.winitd-select-dropdown:not(.winitd-select-dropdown-hidden) .winitd-select-item-option,.ant-select-dropdown:not(.ant-select-dropdown-hidden) .ant-select-item-option,[role="option"]'))
+        .filter(visible)
+        .map(element => ({
+          element,
+          text: textOf(element),
+          title: element.getAttribute('title') || '',
+          aria: element.getAttribute('aria-label') || ''
+        }))
+        .filter(item => item.text || item.title || item.aria);
+      if (options.some(matches)) break;
+    }
+
+    const option = options.find(matches);
+    if (option) {
+      fire(option.element.querySelector('.winitd-select-item-option-content,.ant-select-item-option-content') || option.element);
+      await delay(1000);
+      return {
+        text: option.text || option.title || option.aria,
+        selectedText: currentSelection(select),
+        options: options.map(item => item.text || item.title || item.aria).slice(0, 20)
+      };
+    }
+
+    if (searchInput) {
+      searchInput.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'Enter', code: 'Enter' }));
+      searchInput.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, cancelable: true, key: 'Enter', code: 'Enter' }));
+      await delay(800);
+      return {
+        text: searchText,
+        selectedText: currentSelection(select),
+        options: options.map(item => item.text || item.title || item.aria).slice(0, 20),
+        pressedEnter: true
+      };
+    }
+    return null;
+  }, {
+    targetInputId: inputId,
+    plainLabels,
     sourcePatterns: regexSources(labelList)
   });
   if (selected && waitAfterMs) await sleep(waitAfterMs);
@@ -1104,6 +1323,45 @@ function normalizeWinitPackageInfo(raw, order = {}) {
     raw.platformStoreType ||
     order.storeType ||
     'other';
+  const buyerCountryCode =
+    raw.buyerCountryCode ||
+    raw.countryCode ||
+    raw.receiverCountryCode ||
+    raw.consigneeCountryCode ||
+    order.address?.countryCode ||
+    order.countryCode ||
+    '';
+  const buyerState =
+    raw.buyerState ||
+    raw.state ||
+    raw.receiverState ||
+    raw.consigneeState ||
+    order.address?.state ||
+    order.state ||
+    '';
+  const buyerCity =
+    raw.buyerCity ||
+    raw.city ||
+    raw.receiverCity ||
+    raw.consigneeCity ||
+    order.address?.city ||
+    order.city ||
+    '';
+  const buyerPostcode =
+    raw.buyerPostcode ||
+    raw.postcode ||
+    raw.zipCode ||
+    raw.zipcode ||
+    raw.postCode ||
+    raw.post_code ||
+    raw.receiverPostcode ||
+    raw.receiverZipCode ||
+    raw.consigneePostcode ||
+    order.address?.postcode ||
+    order.address?.zipCode ||
+    order.postcode ||
+    order.zipCode ||
+    '';
   return {
     packageNo,
     shippingNo: packageNo,
@@ -1114,6 +1372,10 @@ function normalizeWinitPackageInfo(raw, order = {}) {
     storeType,
     productCode: raw.productCode || raw.sku || raw.merchandiseCode || order.productCode || '',
     productName: raw.productName || raw.merchandiseName || raw.name || '',
+    buyerCountryCode,
+    buyerState,
+    buyerCity,
+    buyerPostcode,
     rawTextSnippet: compactText(JSON.stringify(raw)).slice(0, 2500)
   };
 }
@@ -1345,12 +1607,117 @@ async function findWinitOrder({ trackingNo }) {
   return fallback;
 }
 
+function normalizeWinitCreateOptions(value = {}) {
+  const source = value && typeof value === 'object' ? value : {};
+  const strategy = String(source.stockStrategy || source.strategy || source.returnStrategy || 'photo-hold').trim();
+  return {
+    stockStrategy: ['photo-hold', 'direct-shelve', 'destroy'].includes(strategy) ? strategy : 'photo-hold',
+    templateType: String(source.templateType || source.photoTemplateType || 'WINIT标准模板-开箱').trim() || 'WINIT标准模板-开箱'
+  };
+}
+
+function firstNonEmpty(...values) {
+  return values.find(value => value !== undefined && value !== null && String(value).trim() !== '') || '';
+}
+
+function mergeNonEmpty(left = {}, right = {}) {
+  const merged = { ...left };
+  for (const [key, value] of Object.entries(right || {})) {
+    if (value !== undefined && value !== null && String(value).trim() !== '') {
+      merged[key] = value;
+    }
+  }
+  return merged;
+}
+
+function packageAddressFallback(packageInfo = {}) {
+  const raw = packageInfo.raw || {};
+  return {
+    countryCode: firstNonEmpty(packageInfo.buyerCountryCode, raw.buyerCountryCode, raw.countryCode),
+    state: firstNonEmpty(packageInfo.buyerState, raw.buyerState, raw.state),
+    city: firstNonEmpty(packageInfo.buyerCity, raw.buyerCity, raw.city),
+    postcode: firstNonEmpty(packageInfo.buyerPostcode, raw.buyerPostcode, raw.postcode, raw.zipCode, raw.zipcode, raw.postCode, raw.post_code)
+  };
+}
+
+function normalizeWinitAddressForQuote(...sources) {
+  return sources.reduce((address, source = {}) => mergeNonEmpty(address, {
+    countryCode: firstNonEmpty(source.countryCode, source.country),
+    state: firstNonEmpty(source.state, source.regionName),
+    city: firstNonEmpty(source.city),
+    postcode: firstNonEmpty(source.postcode, source.zipCode, source.zipcode, source.postCode, source.post_code, source.buyerPostcode),
+    rawTextSnippet: source.rawTextSnippet
+  }), {});
+}
+
+function winitStrategyOptionLabels(strategy) {
+  if (strategy === 'destroy') return [/销毁/];
+  if (strategy === 'direct-shelve') return [/直接上架/];
+  return [/拍照暂存/];
+}
+
+function winitProcessTypeLabels(strategy) {
+  if (strategy === 'destroy') return [/销毁/];
+  if (strategy === 'direct-shelve') return [/直接上架|良品上架/];
+  return [/拍照暂存|暂存/];
+}
+
+function winitStrategyName(strategy) {
+  if (strategy === 'destroy') return '销毁';
+  if (strategy === 'direct-shelve') return '直接上架';
+  return '拍照暂存';
+}
+
+async function selectWinitTemplateType(page, templateType) {
+  const labels = [/WINIT拍照模版类型|WINIT拍照模板类型|拍照模版类型|拍照模板类型|模板类型/i];
+  const attempts = [
+    () => selectWinitSearchableByInputId(page, 'photoTemplateType', [templateType], 800),
+    () => selectWinitMainSelectByInputId(page, 'photoTemplateType', [templateType], 800),
+    () => selectWinitSelectByInputId(page, 'photoTemplateType', [templateType], 800),
+    () => selectWinitDropdown(page, labels, [templateType], 800)
+  ];
+  let lastResult = null;
+  for (const attempt of attempts) {
+    const result = await attempt();
+    if (result) lastResult = result;
+    const state = await readWinitSelectState(page, 'photoTemplateType').catch(() => null);
+    if (winitSelectionMatches(state, [templateType])) {
+      return { ...(state || result || {}), verified: true };
+    }
+    if (winitSelectionMatches(result, [templateType])) {
+      return { ...result, verified: true };
+    }
+  }
+  if (templateType) {
+    await fillFirstMatchingInput(page, templateType, labels).catch(() => false);
+    const retried = await clickWinitText(page, [templateType], { waitAfterMs: 800 });
+    const finalState = await readWinitSelectState(page, 'photoTemplateType').catch(() => null);
+    if (winitSelectionMatches(finalState, [templateType])) {
+      return { ...(finalState || retried || {}), verified: true };
+    }
+    if (retried) return { ...retried, verified: false, selectedText: finalState?.selectedText || retried.text || '' };
+  }
+  const fallback = await selectWinitFirstOptionByInputId(page, 'photoTemplateType', 800);
+  const fallbackState = await readWinitSelectState(page, 'photoTemplateType').catch(() => null);
+  if (fallback && winitSelectionMatches(fallbackState || fallback, [fallback.text])) {
+    return {
+      ...(fallbackState || fallback),
+      text: fallback.text,
+      requestedText: templateType,
+      fallbackFirstOption: true,
+      verified: true
+    };
+  }
+  return lastResult ? { ...lastResult, verified: false } : null;
+}
+
 async function createWinitReturn({
   order,
   dryRun = true,
   allowCreate = false,
   shippingQuote = null,
-  preferCrawlerOnly = config.preferCrawlerOnly
+  preferCrawlerOnly = config.preferCrawlerOnly,
+  winitOptions = {}
 }) {
   const browser = await getBrowser();
   const page = await browser.newPage();
@@ -1390,11 +1757,20 @@ async function createWinitReturn({
 
   const requestedWarehouse = order.warehouse || packageInfo.warehouseName || 'AU Warehouse';
   const returnQuantity = order.returnQuantity || order.returnQty || order.quantity || order.qty || DEFAULT_RETURN_QUANTITY;
+  const resolvedWinitOptions = normalizeWinitCreateOptions(winitOptions || order.winitOptions || {});
+  const fallbackAddress = packageAddressFallback(packageInfo);
   stepStatus.prefillUrl = returnUrl;
   stepStatus.overlaysDismissed = await dismissWinitOverlays(page);
   stepStatus.returnLabel = await ensureWinitReturnLabelYes(page, 800);
   stepStatus.prefillState = await waitForWinitPrefillState(page, outboundOrderNo, 12000);
   stepStatus.formData = await readWinitReturnFormData(page);
+  stepStatus.winitCreateOptions = resolvedWinitOptions;
+  stepStatus.quoteAddress = normalizeWinitAddressForQuote(
+    order.address || {},
+    order,
+    fallbackAddress,
+    stepStatus.formData.address || {}
+  );
   const quote = shippingQuote?.candidates?.length
     ? shippingQuote
     : await calculateWinitShipping({
@@ -1402,10 +1778,9 @@ async function createWinitReturn({
       ...stepStatus.formData,
       packageInfo,
       products: stepStatus.formData.products?.length ? stepStatus.formData.products : order.products,
-      address: {
-        ...(order.address || {}),
-        ...(stepStatus.formData.address || {})
-      }
+      address: stepStatus.quoteAddress,
+      postcode: firstNonEmpty(stepStatus.quoteAddress.postcode, order.postcode, order.zipCode),
+      zipCode: firstNonEmpty(stepStatus.quoteAddress.postcode, order.zipCode)
     }, page).catch(error => ({
       platform: 'winit',
       quoted: false,
@@ -1478,17 +1853,46 @@ async function createWinitReturn({
       await selectWinitSelectByInputId(page, 'warehouseCode', [requestedWarehouse, /^AU\s*Warehouse$/i], 1000) ||
       await selectWinitDropdown(page, [/仓库|Warehouse|下单仓|出货仓|收货仓/i], [requestedWarehouse, /^AU\s*Warehouse$/i], 1000)
     : null;
+  const strategyLabels = winitStrategyOptionLabels(resolvedWinitOptions.stockStrategy);
+  const strategyName = winitStrategyName(resolvedWinitOptions.stockStrategy);
   stepStatus.stockStrategy =
-    await setWinitControlValue(page, { type: 'radio', value: 'SA', waitAfterMs: 800 }) ||
-    await selectWinitDropdown(page, [/策略|入库策略|上架策略|处理策略/i], [/直接上架/], 800) ||
-    await setWinitChoice(page, [/直接上架/], { waitAfterMs: 800 }) ||
-    await clickByText(page, [/直接上架/], { waitAfterMs: 800 });
-  stepStatus.processType =
-    await selectWinitMainSelectByInputId(page, 'handleMethod', ['良品上架'], 800) ||
-    await selectWinitSelectByInputId(page, 'handleMethod', ['良品上架'], 800) ||
-    await selectWinitDropdown(page, [/处理方式|处理类型|货品处理|处置方式/i], [/良品上架/], 800) ||
-    await setWinitChoice(page, [/良品上架/], { waitAfterMs: 800 }) ||
-    await clickByText(page, [/良品上架/], { waitAfterMs: 800 });
+    await selectWinitDropdown(page, [/退货策略|策略|入库策略|上架策略|处理策略/i], strategyLabels, 800) ||
+    await setWinitChoice(page, strategyLabels, { waitAfterMs: 800 }) ||
+    await clickByText(page, strategyLabels, { waitAfterMs: 800 });
+  if (!winitSelectionMatches(stepStatus.stockStrategy, strategyLabels)) {
+    return {
+      platform: 'winit',
+      dryRun,
+      created: false,
+      needsReview: true,
+      stepStatus,
+      shippingQuote: quote,
+      selectedLogistics: quote.selected,
+      logisticsCandidates: (quote.candidates || []).slice(0, 8),
+      rawTextSnippet: compactText(await winitMainText(page)).slice(0, 4000),
+      message: `万邑通退货策略未确认选中“${strategyName}”，已停止提交以避免生成错误退货策略。`
+    };
+  }
+  if (resolvedWinitOptions.stockStrategy === 'photo-hold') {
+    stepStatus.photoTemplateType =
+      await selectWinitTemplateType(page, resolvedWinitOptions.templateType) ||
+      await setWinitChoice(page, [resolvedWinitOptions.templateType], { waitAfterMs: 800 }) ||
+      await clickByText(page, [resolvedWinitOptions.templateType], { waitAfterMs: 800 });
+    if (!stepStatus.photoTemplateType?.verified) {
+      return {
+        platform: 'winit',
+        dryRun,
+        created: false,
+        needsReview: true,
+        stepStatus,
+        shippingQuote: quote,
+        selectedLogistics: quote.selected,
+        logisticsCandidates: (quote.candidates || []).slice(0, 8),
+        rawTextSnippet: compactText(await winitMainText(page)).slice(0, 4000),
+        message: `万邑通拍照暂存模板未确认选中：${resolvedWinitOptions.templateType}`
+      };
+    }
+  }
   stepStatus.senderResetStepOne = await resetWinitSender(page, 800);
 
   stepStatus.prefillState = await readWinitPrefillState(page);
@@ -1496,6 +1900,27 @@ async function createWinitReturn({
   stepStatus.nextAfterStepOne = await clickWinitNext(page, 4000);
   await waitForWinitText(page, [/退货数量|退件数量|Return\s*(Qty|Quantity)|商品信息|SKU/i], 12000);
   stepStatus.quantity = await fillWinitReturnQuantities(page, returnQuantity);
+  const processTypeLabels = winitProcessTypeLabels(resolvedWinitOptions.stockStrategy);
+  stepStatus.processType =
+    await selectWinitMainSelectByInputId(page, 'handleMethod', processTypeLabels, 800) ||
+    await selectWinitSelectByInputId(page, 'handleMethod', processTypeLabels, 800) ||
+    await selectWinitDropdown(page, [/处理方式|处理类型|货品处理|处置方式|上架方式|退货策略/i], processTypeLabels, 800) ||
+    await setWinitChoice(page, processTypeLabels, { waitAfterMs: 800 }) ||
+    await clickByText(page, processTypeLabels, { waitAfterMs: 800 });
+  if (!winitSelectionMatches(stepStatus.processType, processTypeLabels)) {
+    return {
+      platform: 'winit',
+      dryRun,
+      created: false,
+      needsReview: true,
+      stepStatus,
+      shippingQuote: quote,
+      selectedLogistics: quote.selected,
+      logisticsCandidates: (quote.candidates || []).slice(0, 8),
+      rawTextSnippet: compactText(await winitMainText(page)).slice(0, 4000),
+      message: `万邑通 SKU 处理方式未确认选中“${strategyName}”，已停止提交以避免生成错误退货策略。`
+    };
+  }
 
   stepStatus.nextAfterStepTwo = await clickWinitNext(page, 5000);
   await waitForWinitText(page, [/物流产品|官方物流|AU\s*Post|eParcel|Return\s*Service|费用|总费用/i], 15000);
@@ -1518,6 +1943,7 @@ async function createWinitReturn({
   const result = {
     platform: 'winit',
     dryRun,
+    winitCreateOptions: resolvedWinitOptions,
     stepStatus,
     shippingQuote: quote,
     selectedLogistics: selected,

@@ -61,30 +61,54 @@ function parseEccangProducts(text) {
       products.push({ sku: sku || warehouseSku, warehouseSku: warehouseSku || sku, quantity });
     }
   }
-  return products;
+  const bySku = new Map();
+  for (const item of products) {
+    const key = item.warehouseSku || item.sku;
+    const existing = bySku.get(key);
+    if (!existing) {
+      bySku.set(key, item);
+      continue;
+    }
+    bySku.set(key, {
+      sku: existing.sku || item.sku,
+      warehouseSku: existing.warehouseSku || item.warehouseSku,
+      quantity: Math.max(Number(existing.quantity) || 1, Number(item.quantity) || 1)
+    });
+  }
+  return [...bySku.values()];
 }
 
 function countryCodeFromText(text) {
   const source = String(text || '');
   const countryText = firstMatch(source, [/国家或地区[:：]\s*([^\s\[]+)/i]);
-  const bracket = firstMatch(source, [/国家或地区[:：][^\[]*\[([^\]]+)\]/i]);
+  const bracket = firstMatch(source, [/(?:国家或地区|国家|Country)[:：][^\[]*\[([A-Z]{2})\]/i]);
+  if (/^[A-Z]{2}$/i.test(bracket)) return bracket.toUpperCase();
   const normalized = `${countryText} ${bracket}`.toLowerCase();
   if (/英国|united kingdom|great britain|\buk\b/.test(normalized)) return 'GB';
   if (/澳大利亚|australia|\bau\b/.test(normalized)) return 'AU';
   if (/德国|germany|\bde\b/.test(normalized)) return 'DE';
   if (/美国|united states|\bus\b/.test(normalized)) return 'US';
   if (/加拿大|canada|\bca\b/.test(normalized)) return 'CA';
+  if (/波兰|poland|\bpl\b/.test(normalized)) return 'PL';
+  if (/法国|france|\bfr\b/.test(normalized)) return 'FR';
+  if (/西班牙|spain|\bes\b/.test(normalized)) return 'ES';
+  if (/意大利|italy|\bit\b/.test(normalized)) return 'IT';
+  if (/荷兰|netherlands|\bnl\b/.test(normalized)) return 'NL';
   return '';
 }
 
 function parseEccangAddress(text) {
   const source = compactText(text);
   return {
+    name: firstMatch(source, [/(?:收件人|收货人|姓名|Name)[:：]\s*([^\s]+)/i]),
+    phone: firstMatch(source, [/(?:电话|手机|Phone|Tel)[:：]\s*([+0-9 ()-]{6,30})/i]),
     countryCode: countryCodeFromText(source),
-    countryText: firstMatch(source, [/国家或地区[:：]\s*([^\s]+)/i]),
-    state: firstMatch(source, [/(?:省\/州|州|省)[:：]\s*([^\s]+)/i]),
-    city: firstMatch(source, [/城市[:：]\s*([^\s]+)/i]),
-    postcode: firstMatch(source, [/(?:邮编|Postcode|Zip)[:：]?\s*([A-Z0-9 -]{3,12})/i]),
+    countryText: firstMatch(source, [/国家或地区[:：]\s*([^\s]+)/i, /(?:国家|Country)[:：]\s*([^\s]+)/i]),
+    state: firstMatch(source, [/(?:省\/州|州|省|State|Province)[:：]\s*([^\s]+)/i]),
+    city: firstMatch(source, [/(?:城市|City)[:：]\s*([^\s]+)/i]),
+    postcode: firstMatch(source, [/(?:邮编|Postcode|Postal Code|Zip|Zipcode)[:：]?\s*([A-Z0-9 -]{3,12})/i]),
+    address1: firstMatch(source, [/(?:地址1|地址一|详细地址|地址|Address1|Address 1|Address)[:：]\s*([^\n]+?)(?:\s+(?:地址2|国家|省\/州|州|城市|邮编|电话|手机|Email|邮箱)[:：]|$)/i]),
+    address2: firstMatch(source, [/(?:地址2|地址二|Address2|Address 2)[:：]\s*([^\n]+?)(?:\s+(?:国家|省\/州|州|城市|邮编|电话|手机|Email|邮箱)[:：]|$)/i]),
     rawTextSnippet: source.slice(0, 1200)
   };
 }
@@ -94,7 +118,7 @@ function parseEccangOrderText(text, stOrderNo, rows = []) {
   const exactRows = rows.map(row => row.text || row).filter(row => includesQuery(row, stOrderNo));
   const uniqueResultBody = /当前共\s*1\s*条订单|Total\s*1\b|共\s*1\s*条/i.test(body) && includesQuery(body, stOrderNo);
   const targetText = exactRows.join('\n') || (uniqueResultBody ? body : '');
-  const fallbackText = uniqueResultBody && targetText ? `${targetText}\n${body}` : (targetText || body);
+  const fallbackText = targetText ? `${targetText}\n${body}` : body;
   const trackingNumbers = trackingCandidatesFrom(fallbackText, stOrderNo);
   const warehouseMatches = [
     ...fallbackText.matchAll(/发运仓库[:：]?\s*([^\s\]\n]+)/g),
@@ -131,6 +155,61 @@ function parseEccangOrderText(text, stOrderNo, rows = []) {
     address,
     rawTextSnippet: compactText(fallbackText || body).slice(0, 4000)
   };
+}
+
+async function clickEccangAddressDetails(page, stOrderNo) {
+  const patterns = [
+    /查看地址|收货地址|地址详情|买家地址|客户地址/,
+    /订单详情|详情/
+  ];
+  const patternSources = patterns.map(pattern => ({ source: pattern.source, flags: pattern.flags }));
+  for (const frame of page.frames()) {
+    const clicked = await frame.evaluate(({ orderNo, sourcePatterns }) => {
+      const regexes = sourcePatterns.map(item => new RegExp(item.source, item.flags));
+      const visible = element => {
+        const rect = element.getBoundingClientRect();
+        const style = getComputedStyle(element);
+        return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+      };
+      const rowSelectors = [
+        'tr',
+        '[role="row"]',
+        '.ant-table-row',
+        '.el-table__row',
+        '.vxe-body--row',
+        '.ReactVirtualized__Table__row'
+      ];
+      const rows = Array.from(document.querySelectorAll(rowSelectors.join(',')))
+        .filter(visible)
+        .filter(row => (row.innerText || row.textContent || '').replace(/\s+/g, ' ').includes(orderNo));
+      const containers = rows.length ? rows : [document.body];
+      for (const container of containers) {
+        const nodes = Array.from(container.querySelectorAll('button, a, [role="button"], .ant-btn, .el-button, input[type="button"], span, div'))
+          .filter(visible)
+          .map(element => ({
+            element,
+            text: (element.innerText || element.textContent || element.value || '').replace(/\s+/g, '').trim()
+          }))
+          .filter(item => item.text && item.text.length <= 16);
+        for (const regex of regexes) {
+          const target = nodes.find(item => regex.test(item.text));
+          if (target) {
+            target.element.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, cancelable: true, view: window }));
+            target.element.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+            target.element.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
+            target.element.click();
+            return true;
+          }
+        }
+      }
+      return false;
+    }, { orderNo: stOrderNo, sourcePatterns: patternSources }).catch(() => false);
+    if (clicked) {
+      await sleep(1800);
+      return true;
+    }
+  }
+  return false;
 }
 
 async function ensureTemuOrderFrame(page) {
@@ -353,7 +432,9 @@ async function queryEccangOrder(rawOrderNo) {
   await sleep(1500);
 
   const rows = await rowsContaining(page, stOrderNo);
-  const text = await pageText(page);
+  const beforeText = await pageText(page);
+  const openedAddress = await clickEccangAddressDetails(page, stOrderNo);
+  const text = openedAddress ? await pageText(page) : beforeText;
   return parseEccangOrderText(text, stOrderNo, rows);
 }
 

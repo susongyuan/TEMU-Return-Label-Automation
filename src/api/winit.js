@@ -8,6 +8,7 @@ const {
   compactText,
   fetchJson,
   firstNonEmpty,
+  hasNumericAmount,
   md5,
   numericAmount,
   safeSnippet,
@@ -118,6 +119,46 @@ function winitSuccess(json) {
   if (apiSuccess(json)) return true;
   const code = firstNonEmpty(json.code, json.errorCode, json.returnCode);
   return /^(0|200|success)$/i.test(String(code));
+}
+
+function normalizeWinitCreateOptions(value = {}) {
+  const source = value && typeof value === 'object' ? value : {};
+  const strategy = String(source.stockStrategy || source.strategy || source.returnStrategy || 'photo-hold').trim();
+  return {
+    stockStrategy: ['photo-hold', 'direct-shelve', 'destroy'].includes(strategy) ? strategy : 'photo-hold',
+    templateType: String(source.templateType || source.photoTemplateType || 'WINIT标准模板-开箱').trim() || 'WINIT标准模板-开箱'
+  };
+}
+
+function winitPhotoTemplateCode(templateType) {
+  const text = String(templateType || '').trim();
+  if (/WINIT_NO_PHOTO|不开箱|不開箱|no[_\s-]*photo|no[_\s-]*box/i.test(text)) {
+    return 'WINIT_NO_PHOTO';
+  }
+  return 'WINIT';
+}
+
+function winitReturnHandlingFields(options = {}) {
+  const normalized = normalizeWinitCreateOptions(options);
+  if (normalized.stockStrategy === 'direct-shelve') {
+    return {
+      handleMethod: 'SA',
+      shelveMethod: 'GOOD_SA',
+      defaultWinitTemplateImageType: ''
+    };
+  }
+  if (normalized.stockStrategy === 'destroy') {
+    return {
+      handleMethod: 'DE',
+      shelveMethod: '',
+      defaultWinitTemplateImageType: ''
+    };
+  }
+  return {
+    handleMethod: 'NS',
+    shelveMethod: '',
+    defaultWinitTemplateImageType: winitPhotoTemplateCode(normalized.templateType)
+  };
 }
 
 function winitMessage(json, fallback = '') {
@@ -363,8 +404,8 @@ function sortCandidatesByPrice(candidates = []) {
   return [...candidates].sort((left, right) => {
     const leftPrice = Number(left.price);
     const rightPrice = Number(right.price);
-    const leftHasPrice = Number.isFinite(leftPrice);
-    const rightHasPrice = Number.isFinite(rightPrice);
+    const leftHasPrice = hasNumericAmount(left.price);
+    const rightHasPrice = hasNumericAmount(right.price);
     if (leftHasPrice && rightHasPrice) return leftPrice - rightPrice;
     if (leftHasPrice) return -1;
     if (rightHasPrice) return 1;
@@ -543,13 +584,24 @@ function normalizeFeeCandidate(item = {}) {
   return {
     platform: 'winit',
     code: firstNonEmpty(item.deliveryWayCode, item.winitProductCode, item.productCode, item.code),
-    name: firstNonEmpty(item.deliveryWay, item.deliveryWayName, item.productName, item.name, item.deliveryWayCode),
-    price: numericAmount(item.totalFeeUSD, item.totalFee, item.totalAmount, item.amount, item.price),
-    currency: firstNonEmpty(item.ISOCode, item.currency, 'USD'),
+    name: firstNonEmpty(item.deliveryWay, item.deliveryWayName, item.winitProductName, item.productName, item.name, item.deliveryWayCode),
+    price: numericAmount(item.totalAmount, item.totalFeeUSD, item.totalFee, item.amount, item.price),
+    currency: firstNonEmpty(item.currency, item.ISOCode, 'USD'),
     returnLabelSupported: supportsReturnLabel(item),
     deliveryService: firstNonEmpty(returnLabelFlag(item), supportsReturnLabel(item) ? 'Y' : ''),
     raw: item
   };
+}
+
+function deliveryFeeCandidates(json) {
+  const data = dataOf(json) || {};
+  const usableProductList = asArray(data.usableProductList)
+    .map(normalizeFeeCandidate)
+    .filter(item => item.code || item.name);
+  if (usableProductList.length) return usableProductList;
+  return collectObjects(data, item =>
+    Boolean(item.deliveryWayCode || item.deliveryWay || item.winitProductCode || item.productCode)
+  ).map(normalizeFeeCandidate).filter(item => item.code || item.name);
 }
 
 async function calculateWinitShippingApi(order = {}) {
@@ -569,7 +621,22 @@ async function calculateWinitShippingApi(order = {}) {
       input: { warehouseCode, address, products }
     };
   }
+  const merchandiseList = products.length
+    ? products.map(item => ({
+      merchandiseCode: item.productCode || item.warehouseSku || item.sku,
+      qty: Number(item.quantity) || 1
+    }))
+    : [{ length: 10, width: 10, height: 2, weight: 0.2, qty: 1 }];
   const payload = {
+    warehouseCode,
+    country: address.countryCode,
+    zipCode: address.postcode,
+    state: address.state || '',
+    city: address.city || '',
+    merchandiseList,
+    uuid: `return-label-${Date.now()}`
+  };
+  const legacyPayload = {
     warehouseCode,
     country: address.countryCode,
     region: address.state || '',
@@ -586,14 +653,18 @@ async function calculateWinitShippingApi(order = {}) {
       }))
       : [{ length: 10, width: 10, height: 2, weight: 0.2, productNum: 1 }]
   };
-  const fee = await winitCall('wh.outbound.calcDeliveryFee', payload).catch(error => ({ error: error.message }));
-  const feeList = collectObjects(dataOf(fee.json), item =>
-    Boolean(item.deliveryWayCode || item.deliveryWay || item.winitProductCode || item.productCode)
-  ).map(normalizeFeeCandidate).filter(item => item.code || item.name);
+  const fee = await winitCall('wh.outbound.deliveryFeeCalculator', payload).catch(error => ({ error: error.message }));
+  let feeList = deliveryFeeCandidates(fee.json);
+  let legacyFee = null;
+  if (!feeList.length) {
+    legacyFee = await winitCall('wh.outbound.calcDeliveryFee', legacyPayload).catch(error => ({ error: error.message }));
+    feeList = deliveryFeeCandidates(legacyFee.json);
+  }
+  const calculatorCandidates = sortCandidatesByPrice(feeList);
   const psc = await queryPscList().catch(error => ({ error, candidates: [] }));
-  const pscList = psc.candidates || [];
+  const pscList = sortCandidatesByPrice(psc.candidates || []);
   const merged = pscList.map(pscItem => {
-    const feeMatch = feeList.find(item => sameLogisticsCandidate(item, pscItem));
+    const feeMatch = calculatorCandidates.find(item => sameLogisticsCandidate(item, pscItem));
     return {
       ...pscItem,
       price: feeMatch?.price ?? pscItem.price,
@@ -603,7 +674,7 @@ async function calculateWinitShippingApi(order = {}) {
       fee: feeMatch || null
     };
   });
-  const feeOnlyList = feeList
+  const feeOnlyList = calculatorCandidates
     .filter(item => !merged.some(mergedItem => sameLogisticsCandidate(item, mergedItem)));
   const candidates = sortCandidatesByPrice([...merged, ...feeOnlyList]);
   return {
@@ -612,22 +683,31 @@ async function calculateWinitShippingApi(order = {}) {
     payload,
     candidates,
     selected: selectReturnLabelCandidate(candidates),
-    pscCandidates: pscList.slice(0, 20),
-    feeCandidates: feeList.slice(0, 20),
-    message: candidates.length
-      ? '万邑通 OpenAPI 已返回物流/试算候选'
-      : winitMessage(psc.response?.json || fee.json, fee.error || psc.error?.message || '万邑通 OpenAPI 未返回可用物流'),
-    rawTextSnippet: safeSnippet({ fee: fee.json || fee.text || fee.error, psc: psc.response?.json }, 2500)
+    calculatorCandidates,
+    pscCandidates: pscList,
+    feeCandidates: calculatorCandidates,
+    unusableProductList: asArray(dataOf(fee.json)?.unusableProductList),
+    message: calculatorCandidates.length
+      ? '万邑通费用计算器已返回报价'
+      : (candidates.length
+        ? '万邑通 OpenAPI 已返回物流候选，但费用计算器未返回价格'
+        : winitMessage(psc.response?.json || fee.json, fee.error || psc.error?.message || '万邑通 OpenAPI 未返回可用物流')),
+    rawTextSnippet: safeSnippet({
+      fee: fee.json || fee.text || fee.error,
+      legacyFee: legacyFee?.json || legacyFee?.text || legacyFee?.error,
+      psc: psc.response?.json
+    }, 2500)
   };
 }
 
-function buildReturnGoodsPayload(order, selected) {
+function buildReturnGoodsPayload(order, selected, winitOptions = {}) {
   const products = normalizeProducts(order);
   const address = normalizeAddress(order);
   const returnTrackingNo = winitCustomerReturnTrackingNo(order);
   const returnCarrierName = winitCustomerReturnCarrierName(order);
+  const handlingFields = winitReturnHandlingFields(winitOptions || order.winitOptions || {});
   return {
-    customerOrderNo: firstNonEmpty(order.customerOrderNo, order.sellerOrderNo, order.stOrderNo),
+    customerOrderNo: firstNonEmpty(order.stOrderNo, order.customerOrderNo, order.sellerOrderNo),
     isWinitOutbound: 'Y',
     outboundOrderNo: order.warehouseOrderNo || order.outboundOrderNo || '',
     shippingNo: firstNonEmpty(order.shippingNo, order.packageNo),
@@ -650,8 +730,7 @@ function buildReturnGoodsPayload(order, selected) {
       productCode: item.productCode || item.warehouseSku || item.sku,
       productNum: Number(item.quantity) || 1,
       specification: item.specification || '',
-      handleMethod: 'SA',
-      shelveMethod: 'GOOD_SA'
+      ...handlingFields
     }))
   };
 }
@@ -743,7 +822,7 @@ async function resolveExistingReturnOrder(order) {
   };
 }
 
-async function createWinitReturnApi({ order, dryRun = true, allowCreate = false, shippingQuote = null } = {}) {
+async function createWinitReturnApi({ order, dryRun = true, allowCreate = false, shippingQuote = null, winitOptions = {} } = {}) {
   const customLogistics = isWinitCustomReturnLogistics(order);
   const customCandidate = customLogistics ? customWinitReturnCandidate(order) : null;
   const quote = shippingQuote || {
@@ -755,13 +834,15 @@ async function createWinitReturnApi({ order, dryRun = true, allowCreate = false,
       ? '万邑通本次使用客户提供的退货物流信息，不预约 Return Label 物流。'
       : '万邑通本次未提供客户退货物流信息，按 Return Label 否留空创建。'
   };
-  const payload = buildReturnGoodsPayload(order, null);
+  const winitCreateOptions = normalizeWinitCreateOptions(winitOptions || order.winitOptions || {});
+  const payload = buildReturnGoodsPayload(order, null, winitCreateOptions);
   const returnTrackingProvided = Boolean(payload.expressNo);
   const logisticsCandidates = customCandidate ? [customCandidate] : [];
 
   const result = {
     platform: 'winit',
     mode: 'api',
+    winitCreateOptions,
     returnLogisticsMode: customLogistics ? 'custom' : 'auto',
     returnLabelRequired: false,
     returnTrackingProvided,
@@ -774,6 +855,7 @@ async function createWinitReturnApi({ order, dryRun = true, allowCreate = false,
     logisticsCandidates,
     createPayloadPreview: {
       ...payload,
+      winitCreateOptions,
       phone: payload.phone ? '***' : '',
       email: payload.email ? '***' : ''
     }
@@ -798,17 +880,30 @@ async function createWinitReturnApi({ order, dryRun = true, allowCreate = false,
   const data = dataOf(create.json) || {};
   const returnOrderNo = firstNonEmpty(data.returnGoodsOrderNo, data.return_order_no, data.orderNo);
   const rmaNo = firstNonEmpty(data.rmaNo, data.rma_no);
+  const created = Boolean(create.ok && returnOrderNo && (winitSuccess(create.json) || customLogistics));
   result.createResponse = {
     status: create.status,
     ok: create.ok,
     message: winitMessage(create.json, create.error || '')
   };
-  result.created = Boolean(create.ok && winitSuccess(create.json) && returnOrderNo);
+  result.created = created;
   result.returnOrderNo = returnOrderNo;
   result.rmaNo = rmaNo;
   if (!result.created) {
+    if (customLogistics && returnOrderNo) {
+      result.created = true;
+      result.trackingNo = payload.expressNo || '';
+      result.labelNo = '';
+      result.labelFile = null;
+      result.labelDownloadUrl = '';
+      result.downloaded = false;
+      result.message = returnTrackingProvided
+        ? '万邑通 API 已创建退货单，并已上传客户退货物流号，无需下载 Return Label。'
+        : '万邑通 API 已创建退货单；客户退货物流号为空，无需下载 Return Label。';
+      return result;
+    }
     const createMessage = winitMessage(create.json, create.error || '万邑通 API 创建退货单失败');
-    const alreadyCreated = /已生成退货订单|已有退货订单|可退货商品数量不足|数量不足/i.test(createMessage);
+    const alreadyCreated = /已生成退货订单|已有退货订单|已经存在退货单|已存在退货单|退货跟踪号.*存在退货单|可退货商品数量不足|数量不足/i.test(createMessage);
     if (alreadyCreated) {
       const existing = await resolveExistingReturnOrder({
         ...order,

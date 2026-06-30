@@ -30,11 +30,15 @@ function parseOrderLine(line) {
       '';
     const customerReturnCarrierName = line.customerReturnCarrierName ||
       line.returnCarrierName ||
-      line.preferredReturnCourier ||
       line.returnCourier ||
       line.courier ||
       line.supplierName ||
       line.returnSupplierName ||
+      '';
+    const preferredReturnCourier = line.preferredReturnCourier ||
+      line.preferredCourier ||
+      line.preferredLogistics ||
+      customerReturnCarrierName ||
       '';
     const returnLogisticsMode = normalizeReturnMode(line.returnLogisticsMode || line.logisticsMode, customerReturnTrackingNo, customerReturnCarrierName);
     return {
@@ -44,7 +48,7 @@ function parseOrderLine(line) {
       customerReturnTrackingNo,
       returnExpressNo: customerReturnTrackingNo,
       customerReturnCarrierName,
-      preferredReturnCourier: customerReturnCarrierName,
+      preferredReturnCourier,
       returnCourier: customerReturnCarrierName,
       supplierName: customerReturnCarrierName,
       returnSupplierName: customerReturnCarrierName,

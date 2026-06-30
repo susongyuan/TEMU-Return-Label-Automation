@@ -7,6 +7,7 @@ const {
   findGoodcangOrderApi
 } = require('../api/goodcang');
 const { createWinitReturnApi, findWinitOrderApi } = require('../api/winit');
+const { createWinitReturn } = require('./winit');
 
 const SINGLE_ORDER_TIMEOUT_MS = 4 * 60 * 1000;
 const ECCANG_EMPTY_TRACKING_RETRY_MS = 1200;
@@ -15,6 +16,15 @@ function clampConcurrency(value, total) {
   const number = Number(value);
   const concurrency = Number.isFinite(number) && number > 0 ? Math.floor(number) : config.orderConcurrency;
   return Math.max(1, Math.min(concurrency || 1, Math.max(1, total)));
+}
+
+function normalizeWinitOptions(value = {}) {
+  const source = value && typeof value === 'object' ? value : {};
+  const strategy = String(source.stockStrategy || source.strategy || source.returnStrategy || 'photo-hold').trim();
+  return {
+    stockStrategy: ['photo-hold', 'direct-shelve', 'destroy'].includes(strategy) ? strategy : 'photo-hold',
+    templateType: String(source.templateType || source.photoTemplateType || 'WINIT标准模板-开箱').trim() || 'WINIT标准模板-开箱'
+  };
 }
 
 async function mapWithConcurrency(items, concurrency, worker) {
@@ -117,15 +127,20 @@ async function processSingleOrder(orderInput, options = {}, context = {}) {
   const rawOrderNo = inputOrder.rawOrderNo;
   const dryRun = options.dryRun ?? config.dryRunDefault;
   const allowCreate = Boolean(options.allowCreate);
+  const winitOptions = normalizeWinitOptions(options.winitOptions);
   const stOrderNo = inputOrder.stOrderNo || normalizeOrderNo(rawOrderNo);
   const customerReturnTrackingNo = inputOrder.customerReturnTrackingNo || '';
   const customerReturnCarrierName = inputOrder.customerReturnCarrierName || inputOrder.supplierName || '';
+  const preferredReturnCourier = inputOrder.preferredReturnCourier || inputOrder.preferredCourier || inputOrder.preferredLogistics || customerReturnCarrierName || '';
+  const manualSelectedLogistics = inputOrder.manualSelectedLogistics || inputOrder.manualRetryLogistics || null;
   const returnLogisticsMode = inputOrder.returnLogisticsMode || (customerReturnTrackingNo || customerReturnCarrierName ? 'custom' : 'auto');
   const result = {
     rawOrderNo,
     stOrderNo,
     customerReturnTrackingNo,
     customerReturnCarrierName,
+    preferredReturnCourier,
+    manualSelectedLogistics,
     returnLogisticsMode,
     status: 'running',
     steps: []
@@ -159,7 +174,8 @@ async function processSingleOrder(orderInput, options = {}, context = {}) {
         customerReturnTrackingNo,
         returnExpressNo: customerReturnTrackingNo,
         customerReturnCarrierName,
-        preferredReturnCourier: customerReturnCarrierName,
+        preferredReturnCourier,
+        manualSelectedLogistics,
         returnCourier: customerReturnCarrierName,
         supplierName: customerReturnCarrierName,
         returnSupplierName: customerReturnCarrierName,
@@ -169,7 +185,8 @@ async function processSingleOrder(orderInput, options = {}, context = {}) {
       },
       dryRun,
       allowCreate,
-      preferCrawlerOnly: options.preferCrawlerOnly ?? config.preferCrawlerOnly
+      preferCrawlerOnly: options.preferCrawlerOnly ?? config.preferCrawlerOnly,
+      winitOptions
     };
 
     if (allowCreate && !dryRun) {
@@ -179,11 +196,26 @@ async function processSingleOrder(orderInput, options = {}, context = {}) {
       context.realCreatesDone += 1;
     }
 
-    log(`${resolved.platform === 'goodcang' ? '谷仓' : '万邑通'} API 退货单${dryRun ? '预检' : '创建'}（${returnLogisticsMode === 'custom' ? '自选物流' : '平台自动物流'}）`);
-    result.returnCreation =
-      resolved.platform === 'goodcang'
-        ? await createGoodcangReturnApi(createPayload)
-        : await createWinitReturnApi(createPayload);
+    const winitCustomLogistics = resolved.platform === 'winit' && returnLogisticsMode === 'custom';
+    const useWinitCrawler = resolved.platform === 'winit' && allowCreate && !dryRun && !winitCustomLogistics;
+    log(`${resolved.platform === 'goodcang' ? '谷仓' : '万邑通'} ${useWinitCrawler ? '页面' : 'API'} 退货单${dryRun ? '预检' : '创建'}（${returnLogisticsMode === 'custom' ? '自选物流' : '平台自动物流'}）`);
+    if (resolved.platform === 'goodcang') {
+      result.returnCreation = await createGoodcangReturnApi(createPayload);
+    } else if (useWinitCrawler) {
+      try {
+        result.returnCreation = await createWinitReturn(createPayload);
+      } catch (error) {
+        log(`万邑通页面创建不可用，已回退到 API：${error.message}`);
+        result.returnCreation = await createWinitReturnApi(createPayload);
+        result.returnCreation = {
+          ...result.returnCreation,
+          fallbackFromCrawler: true,
+          fallbackReason: error.message
+        };
+      }
+    } else {
+      result.returnCreation = await createWinitReturnApi(createPayload);
+    }
 
     if (
       resolved.platform === 'goodcang' &&

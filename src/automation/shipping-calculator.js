@@ -28,12 +28,13 @@ function orderProducts(order = {}) {
 }
 
 function orderAddress(order = {}) {
+  const address = order.address || {};
   return {
-    countryCode: order.address?.countryCode || order.countryCode || order.country || '',
-    state: order.address?.state || order.state || '',
-    city: order.address?.city || order.city || '',
-    postcode: order.address?.postcode || order.postcode || order.zipCode || '',
-    rawTextSnippet: order.address?.rawTextSnippet || ''
+    countryCode: address.countryCode || address.country || order.countryCode || order.country || '',
+    state: address.state || order.state || '',
+    city: address.city || order.city || '',
+    postcode: address.postcode || address.zipCode || order.postcode || order.zipCode || '',
+    rawTextSnippet: address.rawTextSnippet || order.rawTextSnippet || ''
   };
 }
 
@@ -200,7 +201,18 @@ async function calculateGoodcangShipping(order = {}, page = null) {
 }
 
 function winitCountryCode(order = {}) {
-  return order.address?.countryCode || order.countryCode || order.country || '';
+  return order.address?.countryCode || order.address?.country || order.buyerCountryCode || order.countryCode || order.country || '';
+}
+
+function winitOrderAddress(order = {}) {
+  const address = orderAddress(order);
+  return {
+    ...address,
+    countryCode: address.countryCode || order.buyerCountryCode || '',
+    state: address.state || order.buyerState || '',
+    city: address.city || order.buyerCity || '',
+    postcode: address.postcode || order.buyerPostcode || ''
+  };
 }
 
 function normalizeWinitCandidate(item) {
@@ -251,7 +263,7 @@ async function calculateWinitShipping(order = {}, page = null) {
   const targetPage = page || await gotoPlatform('winit', config.urls.winit);
   await loginIfNeeded(targetPage, 'winit');
   const products = orderProducts(order);
-  const address = orderAddress(order);
+  const address = winitOrderAddress(order);
   const packageInfo = order.packageInfo || {};
   const warehouseCode = packageInfo.warehouseCode || order.warehouseCode || '';
   const country = winitCountryCode(order) || address.countryCode;

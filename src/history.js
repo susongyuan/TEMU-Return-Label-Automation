@@ -163,13 +163,86 @@ function getWarehouseOrderNo(row = {}) {
 
 function getSelectedLogistics(row = {}) {
   const creation = row.returnCreation || {};
-  const selected = firstValue(row.selectedLogistics, row.cheapestLogistics, creation.selectedLogistics, creation.cheapestLogistics);
-  if (!selected || typeof selected !== 'object') return null;
+  const quote = firstValue(row.shippingQuote, creation.shippingQuote) || {};
+  const selected = firstValue(
+    row.selectedLogistics,
+    row.cheapestLogistics,
+    quote.selected,
+    quote.cheapest,
+    creation.selectedLogistics,
+    creation.cheapestLogistics,
+    creation.shippingQuote?.selected,
+    creation.shippingQuote?.cheapest
+  );
+  if (typeof selected === 'string') {
+    return {
+      code: '',
+      name: selected,
+      price: '',
+      currency: 'CNY',
+      selected: true
+    };
+  }
+  if (selected && typeof selected === 'object') {
+    return {
+      code: firstValue(selected.code, selected.channelCode, selected.serviceCode, selected.shippingMethodCode),
+      name: firstValue(
+        selected.name,
+        selected.channelName,
+        selected.logisticsName,
+        selected.serviceName,
+        selected.shippingMethod,
+        selected.provider,
+        selected.deliveryWayName,
+        selected.productName,
+        selected.winitProductName,
+        selected.code,
+        selected.channelCode
+      ),
+      price: firstValue(selected.price, selected.fee, selected.amount, selected.cost, selected.totalFee),
+      currency: firstValue(selected.currency, selected.currencyCode, 'CNY'),
+      selected: Boolean(selected.selected || selected.isSelected || selected.isCheapest || selected.cheapest),
+      ok: Boolean(selected.ok || selected.created)
+    };
+  }
+
+  const pools = [
+    row.logisticsCandidates,
+    row.candidateLogistics,
+    row.logisticsOptions,
+    row.shippingOptions,
+    quote.candidates,
+    quote.calculatorCandidates,
+    quote.feeCandidates,
+    creation.logisticsCandidates,
+    creation.candidateLogistics,
+    creation.logisticsOptions,
+    creation.shippingOptions,
+    creation.candidates,
+    creation.attemptedLogistics,
+    creation.shippingQuote?.candidates,
+    creation.shippingQuote?.calculatorCandidates,
+    creation.shippingQuote?.feeCandidates
+  ];
+  const candidates = (pools.find(items => Array.isArray(items) && items.length) || [])
+    .map(item => getSelectedLogistics({ selectedLogistics: item }))
+    .filter(item => item && (item.name || item.code));
+  return candidates.find(item => item.selected) || candidates.find(item => item.ok) || candidates[0] || null;
+}
+
+function hydrateHistoryRow(row = {}) {
+  const selectedLogisticsJson = parseJson(row.selectedLogisticsJson);
+  const stepsJson = parseJson(row.stepsJson);
+  const requestJson = parseJson(row.requestJson);
+  const responseJson = parseJson(row.responseJson);
+  const selectedLogistics = selectedLogisticsJson || getSelectedLogistics(responseJson || {});
   return {
-    code: firstValue(selected.code, selected.channelCode, selected.serviceCode),
-    name: firstValue(selected.name, selected.channelName, selected.logisticsName, selected.serviceName, selected.shippingMethod, selected.provider),
-    price: firstValue(selected.price, selected.fee, selected.amount, selected.cost, selected.totalFee),
-    currency: firstValue(selected.currency, selected.currencyCode, 'CNY')
+    ...row,
+    selectedLogistics,
+    selectedLogisticsJson,
+    stepsJson,
+    requestJson,
+    responseJson
   };
 }
 
@@ -427,13 +500,7 @@ async function listReturnLabelHistory(options = {}) {
      LIMIT ${limit}`,
     params
   );
-  const items = rows.map(row => ({
-    ...row,
-    selectedLogisticsJson: parseJson(row.selectedLogisticsJson),
-    stepsJson: parseJson(row.stepsJson),
-    requestJson: parseJson(row.requestJson),
-    responseJson: parseJson(row.responseJson)
-  }));
+  const items = rows.map(hydrateHistoryRow);
   return {
     items,
     total: Number(countRows[0]?.total || items.length),
@@ -482,13 +549,7 @@ async function getHistoryRecord(id) {
   );
   if (!rows.length) return null;
   const row = rows[0];
-  return {
-    ...row,
-    selectedLogisticsJson: parseJson(row.selectedLogisticsJson),
-    stepsJson: parseJson(row.stepsJson),
-    requestJson: parseJson(row.requestJson),
-    responseJson: parseJson(row.responseJson)
-  };
+  return hydrateHistoryRow(row);
 }
 
 async function deleteHistoryRecord(id) {

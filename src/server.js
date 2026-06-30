@@ -7,8 +7,9 @@ const { getPool } = require('./db');
 const { createJob, getInternalJob, getJob, listJobs } = require('./jobs');
 const { deleteHistoryRecord, getHistoryRecord, listHistory } = require('./history');
 const { resolveOperatorIdentity } = require('./operator-auth');
+const { calculateShippingQuotes } = require('./shipping-quotes');
 const { probeEccangApi } = require('./api/eccang');
-const { probeGoodcangApi } = require('./api/goodcang');
+const { getGoodcangLabel, probeGoodcangApi } = require('./api/goodcang');
 const { probeWinitApi } = require('./api/winit');
 
 const app = express();
@@ -113,6 +114,25 @@ app.post('/api/preflight-jobs', (req, res) => {
     res.status(error.statusCode || 500).json({
       error: {
         code: 'PREFLIGHT_JOB_CREATE_FAILED',
+        message: error.message
+      }
+    });
+  }
+});
+
+app.post('/api/shipping-quotes', async (req, res) => {
+  try {
+    const data = await calculateShippingQuotes({
+      orderNo: req.body?.orderNo || req.body?.rawOrderNo || req.body?.stOrderNo,
+      platform: req.body?.platform || req.body?.mode || 'auto',
+      postcode: req.body?.postcode || req.body?.zipCode || req.body?.zipcode,
+      addressSupplement: req.body?.addressSupplement || {}
+    });
+    res.json({ data });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({
+      error: {
+        code: 'SHIPPING_QUOTE_FAILED',
         message: error.message
       }
     });
@@ -262,20 +282,46 @@ app.post('/api/probe', async (req, res) => {
   res.json({ data: probes });
 });
 
-app.get('/api/labels/:platform/:fileName', (req, res) => {
-  const platform = String(req.params.platform || '').replace(/[^a-z0-9_-]/gi, '');
-  const fileName = path.basename(String(req.params.fileName || ''));
+async function restoreMissingLabel(platform, fileName) {
+  if (platform !== 'goodcang') return null;
+  const returnOrderNo = path.basename(fileName, path.extname(fileName));
+  if (!/^RG[A-Za-z0-9_-]{6,}$/i.test(returnOrderNo)) return null;
+  const label = await getGoodcangLabel(returnOrderNo, returnOrderNo);
+  return label?.labelFile || null;
+}
+
+app.get(/^\/api\/labels\/([^/]+)\/(.+)$/, async (req, res) => {
+  const platform = String(req.params[0] || '').replace(/[^a-z0-9_-]/gi, '');
+  const rawFileName = (() => {
+    try {
+      return decodeURIComponent(String(req.params[1] || ''));
+    } catch {
+      return String(req.params[1] || '');
+    }
+  })();
+  const fileName = path.basename(rawFileName);
   const labelsRoot = path.join(config.moduleDir, '.runtime', 'labels');
-  const filePath = path.resolve(labelsRoot, platform, fileName);
+  let filePath = path.resolve(labelsRoot, platform, fileName);
   if (!filePath.startsWith(path.resolve(labelsRoot) + path.sep)) {
     res.status(400).json({ error: { code: 'BAD_LABEL_PATH', message: '面单路径非法' } });
     return;
   }
   if (!fs.existsSync(filePath)) {
-    res.status(404).json({ error: { code: 'LABEL_NOT_FOUND', message: '面单文件不存在' } });
-    return;
+    try {
+      const restored = await restoreMissingLabel(platform, fileName);
+      if (restored?.filePath) filePath = restored.filePath;
+    } catch (error) {
+      res.status(502).json({ error: { code: 'LABEL_RESTORE_FAILED', message: `面单文件不存在，重新拉取失败：${error.message}` } });
+      return;
+    }
+    if (!fs.existsSync(filePath)) {
+      res.status(404).json({ error: { code: 'LABEL_NOT_FOUND', message: '面单文件不存在，且未能从平台重新拉取' } });
+      return;
+    }
   }
-  res.download(filePath);
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(fileName)}"`);
+  fs.createReadStream(filePath).pipe(res);
 });
 
 app.use((req, res) => {

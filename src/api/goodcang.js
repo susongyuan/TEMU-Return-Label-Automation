@@ -774,6 +774,48 @@ function chooseGoodcangCourier(quote = {}, order = {}) {
     : null;
 }
 
+function hasPreferredGoodcangCourier(order = {}) {
+  return Boolean(compactText(firstNonEmpty(
+    order.preferredReturnCourier,
+    order.preferredCourier,
+    order.preferredLogistics,
+    order.customerReturnCarrierName,
+    order.returnCourier,
+    order.courier,
+    order.shippingMethod,
+    order.sm_code,
+    order.smCode
+  )));
+}
+
+function uniqueGoodcangSelection(candidates = []) {
+  const used = new Set();
+  return candidates.filter(candidate => {
+    if (!candidate || (!candidate.code && !candidate.name)) return false;
+    const key = candidateKey(candidate);
+    if (used.has(key)) return false;
+    used.add(key);
+    return true;
+  });
+}
+
+function normalizeManualGoodcangLogistics(value = {}) {
+  if (!value || typeof value !== 'object') return null;
+  const code = firstNonEmpty(value.code, value.channelCode, value.serviceCode);
+  const name = firstNonEmpty(value.name, value.channelName, value.logisticsName, value.serviceName, code);
+  if (!code && !name) return null;
+  return {
+    ...value,
+    platform: 'goodcang',
+    code,
+    name,
+    price: value.price ?? null,
+    currency: value.currency || '',
+    returnService: value.returnService !== false,
+    source: value.source || 'manual-selected-logistics'
+  };
+}
+
 function goodcangCustomerReturnTrackingNo(order = {}) {
   return firstNonEmpty(
     order.customerReturnTrackingNo,
@@ -816,6 +858,56 @@ function customGoodcangReturnCandidate(order = {}) {
     source: 'input-custom-logistics',
     customerReturnTrackingNo: goodcangCustomerReturnTrackingNo(order)
   };
+}
+
+async function resolveGoodcangCustomReturnCandidate(order = {}) {
+  const fallback = customGoodcangReturnCandidate(order);
+  if (!fallback) return null;
+
+  const warehouseCode = firstNonEmpty(order.warehouseCode, order.warehouse_code, order.warehouse);
+  const preferredCarrier = goodcangCustomerReturnCarrierName(order);
+  const methods = await getGoodcangReturnShippingMethods(warehouseCode).catch(() => null);
+  const candidates = sortGoodcangCandidates(
+    (methods?.candidates || []).filter(item => !isExcludedGoodcangLogistics(item))
+  );
+  if (!candidates.length) return fallback;
+
+  const matched = chooseGoodcangCourier({
+    candidates
+  }, {
+    ...order,
+    preferredReturnCourier: preferredCarrier,
+    customerReturnCarrierName: preferredCarrier,
+    returnCourier: preferredCarrier,
+    courier: preferredCarrier,
+    shippingMethod: preferredCarrier,
+    sm_code: preferredCarrier,
+    smCode: preferredCarrier
+  });
+  if (matched && !isExcludedGoodcangLogistics(matched)) {
+    return {
+      ...matched,
+      selected: true,
+      source: 'input-custom-logistics-match',
+      customerReturnTrackingNo: goodcangCustomerReturnTrackingNo(order)
+    };
+  }
+
+  const carrierTokens = carrierTokensFromText(preferredCarrier);
+  const fuzzyMatched = candidates.find(candidate => {
+    const candidateTokens = carrierTokensFromText(goodcangAllText(candidate));
+    return candidateTokens.some(token => carrierTokens.includes(token));
+  });
+  if (fuzzyMatched) {
+    return {
+      ...fuzzyMatched,
+      selected: true,
+      source: 'input-custom-logistics-match',
+      customerReturnTrackingNo: goodcangCustomerReturnTrackingNo(order)
+    };
+  }
+
+  return fallback;
 }
 
 async function getGoodcangReturnShippingMethods(warehouseCode = '') {
@@ -933,20 +1025,22 @@ async function calculateGoodcangShippingApi(order = {}) {
     source: 'delivery-fee'
   }))
     .filter(item => item.code || item.name);
+  const calculatorCandidates = sortGoodcangCandidates(deliveryCandidates);
   const returnCandidates = rankGoodcangReturnCandidatesByFee(
     uniqueGoodcangCandidates(officialReturnMethods),
-    deliveryCandidates
+    calculatorCandidates
   );
   const selected = chooseGoodcangCourier({ candidates: returnCandidates }, order);
   return {
     platform: 'goodcang',
-    quoted: returnCandidates.length > 0 || deliveryCandidates.length > 0,
+    quoted: returnCandidates.length > 0 || calculatorCandidates.length > 0,
     payload,
     candidates: returnCandidates,
     returnCandidates: returnCandidates.slice(0, 20),
     selected,
     officialReturnCandidates: officialReturnMethods.slice(0, 20),
-    feeCandidates: deliveryCandidates.slice(0, 20),
+    calculatorCandidates,
+    feeCandidates: calculatorCandidates,
     message: returnCandidates.length
       ? (returnCandidates.length
         ? '谷仓 OpenAPI 已按费用计算机价格匹配官方退货物流'
@@ -956,6 +1050,86 @@ async function calculateGoodcangShippingApi(order = {}) {
       returnMethods: methods.response?.json || methods.message,
       deliveryFee: response.json || response.text || response.error
     }, 2500)
+  };
+}
+
+function inventoryQuantity(item = {}, names = []) {
+  for (const name of names) {
+    const value = Number(item[name]);
+    if (Number.isFinite(value)) return value;
+  }
+  return 0;
+}
+
+function normalizeGoodcangInventoryItem(item = {}) {
+  const sellable = inventoryQuantity(item, ['sellable', 'available', 'available_qty', 'availableQty']);
+  const pending = inventoryQuantity(item, ['pending']);
+  const reserved = inventoryQuantity(item, ['reserved']);
+  const unsellable = inventoryQuantity(item, ['unsellable']);
+  const onway = inventoryQuantity(item, ['onway', 'total_onway', 'totalOnway']);
+  const warehouseCode = firstNonEmpty(item.warehouse_code, item.warehouseCode, item.warehouse);
+  return {
+    platform: 'goodcang',
+    sku: firstNonEmpty(item.product_sku, item.productSku, item.sku),
+    productBarcode: firstNonEmpty(item.product_barcode, item.productBarcode),
+    warehouseCode,
+    warehouseName: firstNonEmpty(item.warehouse_desc, item.warehouseDesc, item.warehouse_name, item.warehouseName, warehouseCode),
+    sellable,
+    pending,
+    reserved,
+    unsellable,
+    onway,
+    raw: item
+  };
+}
+
+async function queryGoodcangInventoryBySkus(skus = []) {
+  const productSkus = [...new Set(skus.map(value => String(value || '').trim()).filter(Boolean))];
+  if (!productSkus.length) {
+    return {
+      platform: 'goodcang',
+      found: false,
+      items: [],
+      warehouseCandidates: [],
+      message: '谷仓库存查询缺少 SKU'
+    };
+  }
+
+  const response = await goodcangCall('/inventory/get_product_inventory', {
+    page: 1,
+    pageSize: Math.max(20, productSkus.length * 20),
+    product_sku_arr: productSkus
+  });
+  const items = dataList(response.json).map(normalizeGoodcangInventoryItem)
+    .filter(item => item.warehouseCode && item.sku);
+  const byWarehouse = new Map();
+  for (const item of items) {
+    const current = byWarehouse.get(item.warehouseCode) || {
+      warehouseCode: item.warehouseCode,
+      warehouseName: item.warehouseName,
+      items: [],
+      matchedSkuCount: 0,
+      sellableTotal: 0
+    };
+    current.items.push(item);
+    current.matchedSkuCount = new Set(current.items.map(row => row.sku)).size;
+    current.sellableTotal += item.sellable;
+    byWarehouse.set(item.warehouseCode, current);
+  }
+  const warehouseCandidates = [...byWarehouse.values()]
+    .sort((left, right) => {
+      if (right.matchedSkuCount !== left.matchedSkuCount) return right.matchedSkuCount - left.matchedSkuCount;
+      return right.sellableTotal - left.sellableTotal;
+    });
+  return {
+    platform: 'goodcang',
+    found: items.length > 0,
+    items,
+    warehouseCandidates,
+    message: items.length
+      ? '谷仓库存接口已返回 SKU 仓库库存'
+      : goodcangMessage(response.json, response.error || '谷仓库存接口未返回 SKU 库存'),
+    rawTextSnippet: safeSnippet(response.json || response.text || response.error, 2000)
   };
 }
 
@@ -974,7 +1148,7 @@ function buildReturnPayload(order, selected) {
     service_type: 1,
     logistics: customLogistics ? GOODCANG_CUSTOM_LOGISTICS : GOODCANG_PLATFORM_LOGISTICS,
     courier: customLogistics
-      ? customerReturnCarrierName
+      ? ''
       : firstNonEmpty(selected?.code, selected?.courier, selected?.name, order.returnCourier, order.courier, order.shippingMethod),
     tracking_no: customLogistics ? customerReturnTrackingNo : '',
     ro_desc: order.returnReason || 'customer return',
@@ -1004,7 +1178,7 @@ function validateReturnPayload(payload) {
   const missing = [];
   if (!payload.order_code) missing.push('仓库订单号 order_code');
   if (!payload.warehouse_code) missing.push('退件收货仓库 warehouse_code');
-  if (!payload.courier) missing.push('可用物流产品 courier');
+  if (payload.logistics === GOODCANG_PLATFORM_LOGISTICS && !payload.courier) missing.push('可用物流产品 courier');
   if (payload.logistics === GOODCANG_CUSTOM_LOGISTICS && !payload.tracking_no) missing.push('自选退货物流号 tracking_no');
   if (!payload.product_list.length) missing.push('退件 SKU product_list');
   if (!payload.delivery_address.country_code) missing.push('退件地址国家 country_code');
@@ -1048,6 +1222,13 @@ function extractCreateResult(json) {
     ),
     raw: source
   };
+}
+
+function goodcangCreateOk(create, createData, customLogistics = false) {
+  const hasReturnOrderNo = Boolean(createData?.returnOrderNo);
+  if (!create?.ok || !hasReturnOrderNo) return false;
+  if (apiSuccess(create.json)) return true;
+  return Boolean(customLogistics);
 }
 
 function looksLikeBase64(value) {
@@ -1111,6 +1292,26 @@ async function queryGoodcangReturnOrders(filters = {}) {
   };
 }
 
+function goodcangReturnOrderStatus(item = {}) {
+  return firstNonEmpty(
+    item.asro_status,
+    item.asroStatus,
+    item.asro_status_text,
+    item.asroStatusText,
+    item.status_name,
+    item.statusName,
+    item.status_text,
+    item.statusText,
+    item.status
+  );
+}
+
+function isDiscardedGoodcangReturnOrder(item = {}) {
+  const status = compactText(goodcangReturnOrderStatus(item));
+  return status === '6' ||
+    /废弃|作废|取消|已取消|cancel|cancelled|void|discard|discarded|abandon|abandoned|invalid/i.test(status);
+}
+
 async function resolveExistingGoodcangReturnOrder(order = {}) {
   const orderCode = firstNonEmpty(order.warehouseOrderNo, order.order_code, order.orderCode, order.orderNo);
   const referenceNo = firstNonEmpty(order.stOrderNo, order.referenceNo, order.rawOrderNo);
@@ -1124,7 +1325,7 @@ async function resolveExistingGoodcangReturnOrder(order = {}) {
 
   for (const query of queries) {
     const result = await queryGoodcangReturnOrders(query);
-    const item = result.list.find(row =>
+    const matchedRows = result.list.filter(row =>
       (orderCode && (
         row.order_code === orderCode ||
         asArray(row.order_code_list).includes(orderCode)
@@ -1132,6 +1333,7 @@ async function resolveExistingGoodcangReturnOrder(order = {}) {
       (referenceNo && row.reference_no === referenceNo) ||
       (order.returnOrderNo && row.asro_code === order.returnOrderNo)
     );
+    const item = matchedRows.find(row => !isDiscardedGoodcangReturnOrder(row));
     if (item) {
       return {
         response: result.response,
@@ -1140,7 +1342,7 @@ async function resolveExistingGoodcangReturnOrder(order = {}) {
         trackingNo: firstNonEmpty(item.tracking_no, item.trackingNo),
         labelNo: firstNonEmpty(item.tracking_no, item.trackingNo, item.asro_code),
         feeDetails: firstNonEmpty(item.fee_details, item.charge_details),
-        status: firstNonEmpty(item.asro_status, item.status)
+        status: goodcangReturnOrderStatus(item)
       };
     }
   }
@@ -1149,7 +1351,9 @@ async function resolveExistingGoodcangReturnOrder(order = {}) {
 
 async function createGoodcangReturnApi({ order, dryRun = true, allowCreate = false, shippingQuote = null } = {}) {
   const customLogistics = isGoodcangCustomReturnLogistics(order);
-  const customCandidate = customLogistics ? customGoodcangReturnCandidate(order) : null;
+  const customCandidate = customLogistics ? await resolveGoodcangCustomReturnCandidate(order) : null;
+  const manualSelectedLogistics = normalizeManualGoodcangLogistics(order.manualSelectedLogistics || order.manualRetryLogistics);
+  const manualOfficialRetry = Boolean(manualSelectedLogistics) && !customLogistics;
   const quote = customLogistics
     ? {
       platform: 'goodcang',
@@ -1169,12 +1373,24 @@ async function createGoodcangReturnApi({ order, dryRun = true, allowCreate = fal
       .filter(item => item && (item.code || item.name))
   );
   const pricedCandidates = preferredCandidates.filter(hasGoodcangPrice);
-  const selected = hasGoodcangPrice(quote.selected) && !isExcludedGoodcangLogistics(quote.selected)
-    ? quote.selected
-    : chooseGoodcangCourier({ candidates: pricedCandidates }, order);
+  const preferredSelected = hasPreferredGoodcangCourier(order)
+    ? chooseGoodcangCourier({ candidates: preferredCandidates }, order)
+    : null;
+  const manualSelected = manualOfficialRetry
+    ? (preferredSelected || manualSelectedLogistics)
+    : null;
+  const selected = preferredSelected ||
+    (hasGoodcangPrice(quote.selected) && !isExcludedGoodcangLogistics(quote.selected)
+      ? quote.selected
+      : chooseGoodcangCourier({ candidates: pricedCandidates }, order));
   const selectedCandidates = customLogistics
     ? [customCandidate].filter(Boolean)
-    : pricedCandidates;
+    : (manualOfficialRetry
+      ? [manualSelected].filter(Boolean)
+      : uniqueGoodcangSelection([
+        preferredSelected,
+        ...pricedCandidates
+      ]));
   const selectedLogistics = selectedCandidates[0] || selected || customCandidate;
   const payload = buildReturnPayload(order, selectedLogistics);
   const result = {
@@ -1184,8 +1400,11 @@ async function createGoodcangReturnApi({ order, dryRun = true, allowCreate = fal
     created: false,
     returnLogisticsMode: customLogistics ? 'custom' : 'auto',
     returnTrackingProvided: Boolean(goodcangCustomerReturnTrackingNo(order)),
-    selectionStrategy: customLogistics ? 'input-custom-logistics' : 'fee-calculator-official-intersection',
+    selectionStrategy: customLogistics
+      ? 'input-custom-logistics'
+      : (manualOfficialRetry ? 'manual-selected-official-logistics' : 'fee-calculator-official-intersection'),
     shippingQuote: quote,
+    manualSelectedLogistics: manualSelectedLogistics || null,
     selectedLogistics,
     logisticsCandidates: (customLogistics ? selectedCandidates : preferredCandidates).slice(0, 8),
     attemptedLogistics: [],
@@ -1215,7 +1434,7 @@ async function createGoodcangReturnApi({ order, dryRun = true, allowCreate = fal
       message: `谷仓 API 创建缺少：${fieldList(missing)}`
     };
   }
-  if (!selectedLogistics?.code && !selectedLogistics?.name && !payload.courier) {
+  if (!customLogistics && !selectedLogistics?.code && !selectedLogistics?.name && !payload.courier) {
     return {
       ...result,
       needsReview: true,
@@ -1279,13 +1498,14 @@ async function createGoodcangReturnApi({ order, dryRun = true, allowCreate = fal
     const createData = extractCreateResult(create.json);
     const returnOrderNo = createData.returnOrderNo;
     const trackingNo = firstNonEmpty(createData.trackingNo, customLogistics ? goodcangCustomerReturnTrackingNo(order) : '');
+    const created = goodcangCreateOk(create, createData, customLogistics);
     const attempt = {
       code: candidate?.code || attemptPayload.courier,
       name: candidate?.name || candidate?.code || attemptPayload.courier,
       price: candidate?.price ?? null,
       currency: candidate?.currency || '',
-      ok: create.ok && apiSuccess(create.json),
-      created: Boolean(create.ok && apiSuccess(create.json) && returnOrderNo),
+      ok: created || (create.ok && apiSuccess(create.json)),
+      created,
       message: goodcangMessage(create.json, create.error || '')
     };
     result.attemptedLogistics.push(attempt);
@@ -1305,7 +1525,7 @@ async function createGoodcangReturnApi({ order, dryRun = true, allowCreate = fal
     lastReturnOrderNo = returnOrderNo;
     lastTrackingNo = trackingNo;
     if (result.created) break;
-    const retryable = /物流|logistics|courier|verification|verify|product|渠道|服务|不可用|不支持|not support|invalid/i.test(attempt.message);
+    const retryable = /物流|logistics|courier|verification|verify|product|渠道|服务|不可用|不支持|not support|invalid|psc|billing|exception|尺寸|长宽高|超长|超重|size|dimension/i.test(attempt.message);
     if (!retryable) break;
   }
 
@@ -1313,6 +1533,19 @@ async function createGoodcangReturnApi({ order, dryRun = true, allowCreate = fal
     const create = lastCreate || {};
     const returnOrderNo = lastReturnOrderNo || lastCreateData.returnOrderNo;
     const trackingNo = lastTrackingNo || lastCreateData.trackingNo;
+    if (customLogistics && returnOrderNo) {
+      result.created = true;
+      result.returnOrderNo = returnOrderNo;
+      result.trackingNo = firstNonEmpty(trackingNo, goodcangCustomerReturnTrackingNo(order));
+      result.labelNo = firstNonEmpty(result.trackingNo, returnOrderNo);
+      result.labelFile = null;
+      result.labelDownloadUrl = '';
+      result.labelBase64 = false;
+      result.downloaded = false;
+      result.message = '谷仓 API 已按自选物流创建退货单；平台不生成预约退货面单文件。';
+      result.labelInfo = null;
+      return result;
+    }
     const createMessage = create.ok && apiSuccess(create.json) && !returnOrderNo
       ? '谷仓 API 创建成功响应缺少退货单号 asro_code/return_order_code'
       : goodcangMessage(create.json, create.error || '谷仓 API 创建退货单失败');
@@ -1440,9 +1673,11 @@ module.exports = {
   createGoodcangReturnApi,
   finalizeGoodcangReturnsApi,
   findGoodcangOrderApi,
+  getGoodcangLabel,
   goodcangCall,
   normalizeGoodcangOrder,
   probeGoodcangApi,
+  queryGoodcangInventoryBySkus,
   _internal: {
     isExcludedGoodcangLogistics,
     rankGoodcangReturnCandidatesByFee,

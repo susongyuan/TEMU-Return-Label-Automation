@@ -8,6 +8,8 @@ const { sleep } = require('./common');
 
 let browserPromise = null;
 let edgeProcess = null;
+let launchedBrowser = null;
+let browserMode = '';
 
 function getJson(url) {
   return new Promise((resolve, reject) => {
@@ -77,10 +79,59 @@ async function ensureEdgeCdp() {
   throw new Error(`Edge CDP did not start on port ${config.cdpPort}`);
 }
 
+function resolveBrowserExecutable() {
+  const candidates = [
+    process.env.BROWSER_EXECUTABLE_PATH,
+    config.edgePath,
+    '/usr/bin/chromium',
+    '/usr/bin/chromium-browser',
+    '/usr/bin/google-chrome-stable',
+    '/usr/bin/google-chrome'
+  ].filter(Boolean);
+  return candidates.find(candidate => fs.existsSync(candidate)) || '';
+}
+
+async function launchLocalBrowser() {
+  const executablePath = resolveBrowserExecutable();
+  if (!executablePath) {
+    throw new Error('No browser executable found for local launch');
+  }
+  fs.mkdirSync(config.userDataDir, { recursive: true });
+  launchedBrowser = await puppeteer.launch({
+    executablePath,
+    headless: config.headless ? 'new' : false,
+    defaultViewport: null,
+    protocolTimeout: 180000,
+    userDataDir: config.userDataDir,
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-gpu',
+      '--disable-features=msEdgeSidebarV2',
+      '--window-size=1440,1000'
+    ]
+  });
+  browserMode = 'launch';
+  return launchedBrowser;
+}
+
 async function getBrowser() {
   if (!browserPromise) {
     browserPromise = (async () => {
+      if (await isCdpReady()) {
+        browserMode = 'cdp';
+        return puppeteer.connect({
+          browserURL: `http://127.0.0.1:${config.cdpPort}`,
+          defaultViewport: null,
+          protocolTimeout: 180000
+        });
+      }
+      if (process.platform !== 'win32') {
+        return launchLocalBrowser();
+      }
       await ensureEdgeCdp();
+      browserMode = 'cdp';
       return puppeteer.connect({
         browserURL: `http://127.0.0.1:${config.cdpPort}`,
         defaultViewport: null,
@@ -126,7 +177,13 @@ async function closeBrowserConnection() {
   if (!browserPromise) return;
   const browser = await browserPromise.catch(() => null);
   browserPromise = null;
-  if (browser) await browser.disconnect().catch(() => {});
+  if (browserMode === 'launch') {
+    await browser?.close().catch(() => {});
+    launchedBrowser = null;
+  } else {
+    await browser?.disconnect().catch(() => {});
+  }
+  browserMode = '';
 }
 
 module.exports = {
